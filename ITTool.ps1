@@ -280,6 +280,10 @@ function Install-OpenVPN {
             Write-Host "[!] OpenVPN installer finished with exit code: $($process.ExitCode)" -ForegroundColor Yellow
             Write-ITLog -Action "OpenVPN Installation" -Result "Completed with warning (ExitCode: $($process.ExitCode))" -Level "WARNING"
         }
+
+        # Auto-import VPN configuration profile
+        Import-OpenVPNConfig -ProfileName "Carrybee-IPTSP-BOL.ovpn"
+
     } catch {
         Write-Host "[-] OpenVPN installation failed: $($_.Exception.Message)" -ForegroundColor Red
         Write-ITLog -Action "OpenVPN Installation" -Result "Failed: $($_.Exception.Message)" -Level "ERROR"
@@ -291,6 +295,67 @@ function Install-OpenVPN {
 
     Write-Host ""
     Read-Host "Press Enter to return to main menu..."
+}
+
+function Import-OpenVPNConfig {
+    <#
+    .SYNOPSIS
+        Downloads and automatically imports the specified OVPN profile into OpenVPN.
+    #>
+    param (
+        [string]$ProfileName = "Carrybee-IPTSP-BOL.ovpn"
+    )
+
+    Write-Host ""
+    Write-Host "[*] Configuring OpenVPN Profile ($ProfileName)..." -ForegroundColor Cyan
+    
+    $ovpnRemoteUrl = "$Script:BaseRawUrl/Software/$ProfileName"
+    $ovpnLocalPath = "$Script:CompanyDir\$ProfileName"
+
+    $downloadSuccess = Download-FileWithProgress -Url $ovpnRemoteUrl -DestinationPath $ovpnLocalPath -DisplayName "VPN Profile ($ProfileName)"
+    if (-not $downloadSuccess) {
+        Write-Host "[!] Could not download VPN profile. Skipping import." -ForegroundColor Yellow
+        Write-ITLog -Action "Import OVPN Config" -Result "Failed download: $ProfileName" -Level "WARNING"
+        return
+    }
+
+    $imported = $false
+
+    # 1. OpenVPN Connect v3
+    $ovpnConnectPath = "$env:ProgramFiles\OpenVPN Connect\OpenVPNConnect.exe"
+    if (Test-Path $ovpnConnectPath) {
+        Write-Host "[*] OpenVPN Connect detected. Launching profile import..." -ForegroundColor Cyan
+        try {
+            Start-Process -FilePath $ovpnConnectPath -ArgumentList "--import-profile=`"$ovpnLocalPath`""
+            Write-Host "[+] Profile sent to OpenVPN Connect successfully!" -ForegroundColor Green
+            Write-ITLog -Action "Import OVPN Config" -Result "Imported into OpenVPN Connect ($ProfileName)" -Level "SUCCESS"
+            $imported = $true
+        } catch {
+            Write-Host "[!] Error triggering OpenVPN Connect import: $($_.Exception.Message)" -ForegroundColor Yellow
+            Write-ITLog -Action "Import OVPN Config" -Result "Error: $($_.Exception.Message)" -Level "WARNING"
+        }
+    }
+
+    # 2. OpenVPN Community Client
+    $communityConfigPath = "$env:ProgramFiles\OpenVPN\config"
+    if (Test-Path "$env:ProgramFiles\OpenVPN") {
+        Write-Host "[*] OpenVPN Community detected. Copying profile to config folder..." -ForegroundColor Cyan
+        try {
+            if (-not (Test-Path $communityConfigPath)) {
+                New-Item -Path $communityConfigPath -ItemType Directory -Force | Out-Null
+            }
+            Copy-Item -Path $ovpnLocalPath -Destination "$communityConfigPath\$ProfileName" -Force
+            Write-Host "[+] Profile copied to $communityConfigPath\$ProfileName!" -ForegroundColor Green
+            Write-ITLog -Action "Import OVPN Config" -Result "Copied to OpenVPN Community config" -Level "SUCCESS"
+            $imported = $true
+        } catch {
+            Write-Host "[!] Error copying to OpenVPN config: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+    }
+
+    if (-not $imported) {
+        Write-Host "[*] Profile saved locally to $ovpnLocalPath." -ForegroundColor Yellow
+    }
 }
 
 # ==============================================================================
