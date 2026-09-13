@@ -240,7 +240,11 @@ function Install-MicroSIPInternal {
 
     Write-Host "[*] Installing MicroSIP silently..." -ForegroundColor Cyan
     try {
-        $process = Start-Process -FilePath $installerPath -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART" -Wait -PassThru -NoNewWindow
+        # Close any active MicroSIP instance to prevent installer prompts
+        Get-Process -Name "microsip" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+
+        # MicroSIP is packaged with NSIS. The silent switch is strictly /S (case-sensitive)
+        $process = Start-Process -FilePath $installerPath -ArgumentList "/S" -Wait -PassThru -NoNewWindow
         if ($process.ExitCode -eq 0) {
             Write-Host "[+] MicroSIP successfully installed!" -ForegroundColor Green
             Write-ITLog -Action "MicroSIP Installation" -Result "Completed Successfully" -Level "SUCCESS"
