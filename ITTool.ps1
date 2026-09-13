@@ -1,5 +1,5 @@
 # ==============================================================================
-# COMPANY IT DEPLOYMENT & PROVISIONING UTILITY
+# COMPANY IT DEPLOYMENT & PROVISIONING UTILITY (v2.0)
 # Target OS: Windows 10 / Windows 11 (x64)
 # Execution: irm https://<short-url>/ITTool | iex
 # ==============================================================================
@@ -21,7 +21,7 @@ $Script:LogFile        = "$Script:LogDir\ITTool.log"
 $Script:TempDir        = "$env:TEMP\ITTool_$(Get-Random)"
 
 # ==============================================================================
-# 0. PRIVILEGE ELEVATION CHECK
+# 0. PRIVILEGE ELEVATION CHECK & SELF-RESTART
 # ==============================================================================
 function Assert-Administrator {
     <#
@@ -55,7 +55,7 @@ function Assert-Administrator {
 }
 
 # ==============================================================================
-# LOGGING SYSTEM
+# LOGGING SYSTEM & ENVIRONMENT SETUP
 # ==============================================================================
 function Initialize-Environment {
     <#
@@ -63,9 +63,12 @@ function Initialize-Environment {
         Ensures necessary directory structures and log files exist.
     #>
     try {
-        # Force TLS 1.2 and TLS 1.3 for secure downloads
+        # Force TLS 1.2 and TLS 1.3 for secure web requests
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12, [Net.SecurityProtocolType]::Tls13
 
+        if (-not (Test-Path -Path $Script:CompanyDir)) {
+            New-Item -Path $Script:CompanyDir -ItemType Directory -Force | Out-Null
+        }
         if (-not (Test-Path -Path $Script:LogDir)) {
             New-Item -Path $Script:LogDir -ItemType Directory -Force | Out-Null
         }
@@ -107,7 +110,7 @@ function Write-ITLog {
 function Download-FileWithProgress {
     <#
     .SYNOPSIS
-        Downloads a file with BITS/HttpClient with fallback and visual feedback.
+        Downloads a remote file with visual status and validation.
     #>
     param (
         [Parameter(Mandatory = $true)][string]$Url,
@@ -120,23 +123,6 @@ function Download-FileWithProgress {
     Write-Host "    Dest:   $DestinationPath" -ForegroundColor Gray
 
     try {
-        $webClient = New-Object System.Net.WebClient
-        $webClient.Headers.Add("User-Agent", "Company-ITTool-Deployer/1.0")
-        
-        # Use synchronous download with custom progress display
-        $totalBytes = 0
-        $request = [System.Net.WebRequest]::Create($Url)
-        $request.Method = "HEAD"
-        $request.Timeout = 10000
-        try {
-            $response = $request.GetResponse()
-            $totalBytes = $response.ContentLength
-            $response.Close()
-        } catch {
-            $totalBytes = -1
-        }
-
-        # Perform download using HttpClient or WebClient
         Invoke-WebRequest -Uri $Url -OutFile $DestinationPath -UseBasicParsing -ErrorAction Stop
 
         if (Test-Path -Path $DestinationPath) {
@@ -154,157 +140,127 @@ function Download-FileWithProgress {
 }
 
 function Cleanup-TempFolder {
-    <#
-    .SYNOPSIS
-        Cleans up temporary downloads.
-    #>
     if (Test-Path -Path $Script:TempDir) {
         try {
             Remove-Item -Path $Script:TempDir -Recurse -Force -ErrorAction SilentlyContinue
         } catch {
-            # Non-blocking cleanup
+            # Non-blocking
         }
     }
 }
 
 # ==============================================================================
-# OPTION 1: DEVICE INFORMATION & RENAME
+# [1] INSTALL BROWSERS (CHROME & FIREFOX)
 # ==============================================================================
-function Show-DeviceInformation {
-    Clear-Host
-    Write-Host "=================================================" -ForegroundColor Cyan
-    Write-Host "              DEVICE INFORMATION                 " -ForegroundColor Yellow
-    Write-Host "=================================================" -ForegroundColor Cyan
+function Install-GoogleChromeInternal {
+    $downloadUrl = "https://dl.google.com/chrome/install/latest/chrome_installer.exe"
+    $installerPath = "$Script:TempDir\chrome_installer.exe"
 
-    Write-Host "[*] Querying system components..." -ForegroundColor Gray
+    Write-ITLog -Action "Chrome Installation" -Result "Started" -Level "INFO"
+
+    $downloadSuccess = Download-FileWithProgress -Url $downloadUrl -DestinationPath $installerPath -DisplayName "Google Chrome Enterprise"
+    if (-not $downloadSuccess) { return $false }
+
+    Write-Host "[*] Installing Google Chrome silently..." -ForegroundColor Cyan
     try {
-        $cs      = Get-CimInstance -ClassName Win32_ComputerSystem
-        $os      = Get-CimInstance -ClassName Win32_OperatingSystem
-        $bios    = Get-CimInstance -ClassName Win32_BIOS
-        $cpu     = Get-CimInstance -ClassName Win32_Processor | Select-Object -First 1
-        $ramGB   = [math]::Round(($cs.TotalPhysicalMemory / 1GB), 2)
-        
-        # Network Adapter Details (Active adapters with IP)
-        $netConfigs = Get-CimInstance -ClassName Win32_NetworkAdapterConfiguration | Where-Object { $_.IPEnabled -eq $true }
-        $ipList  = ($netConfigs.IPAddress | Where-Object { $_ -match '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$' }) -join ", "
-        $macList = ($netConfigs.MACAddress) -join ", "
-
-        $displayIp = if ($ipList) { $ipList } else { "N/A" }
-        $displayMac = if ($macList) { $macList } else { "N/A" }
-
-        Write-Host "Computer Name:       " -NoNewline; Write-Host $env:COMPUTERNAME -ForegroundColor Green
-        Write-Host "BIOS Serial Number:  " -NoNewline; Write-Host $bios.SerialNumber -ForegroundColor Green
-        Write-Host "Manufacturer:        " -NoNewline; Write-Host $cs.Manufacturer -ForegroundColor White
-        Write-Host "Model:               " -NoNewline; Write-Host $cs.Model -ForegroundColor White
-        Write-Host "CPU:                 " -NoNewline; Write-Host $cpu.Name.Trim() -ForegroundColor White
-        Write-Host "RAM:                 " -NoNewline; Write-Host "$ramGB GB" -ForegroundColor White
-        Write-Host "Windows Edition:     " -NoNewline; Write-Host $os.Caption -ForegroundColor White
-        Write-Host "Windows Version:     " -NoNewline; Write-Host "$($os.Version) (Build $($os.BuildNumber))" -ForegroundColor White
-        Write-Host "Current Username:    " -NoNewline; Write-Host "$env:USERDOMAIN\$env:USERNAME" -ForegroundColor White
-        Write-Host "IP Address:          " -NoNewline; Write-Host $displayIp -ForegroundColor Yellow
-        Write-Host "MAC Address:         " -NoNewline; Write-Host $displayMac -ForegroundColor Yellow
-        Write-Host "=================================================" -ForegroundColor Cyan
-
-        Write-ITLog -Action "Query Device Information" -Result "Success (Host: $env:COMPUTERNAME, Serial: $($bios.SerialNumber))" -Level "INFO"
-
-        Write-Host ""
-        $renameChoice = Read-Host "Do you want to change computer name? (Y/N)"
-        if ($renameChoice -match '^[Yy]$') {
-            $newName = Read-Host "Enter new computer name (max 15 characters, no spaces)"
-            if ([string]::IsNullOrWhiteSpace($newName)) {
-                Write-Host "[-] Invalid name entered. Aborting rename." -ForegroundColor Red
-            } elseif ($newName.Length -gt 15) {
-                Write-Host "[-] Error: NetBIOS computer names must be 15 characters or fewer." -ForegroundColor Red
-            } else {
-                try {
-                    Rename-Computer -NewName $newName -Force -ErrorAction Stop
-                    Write-Host "[+] Computer successfully renamed to '$newName'." -ForegroundColor Green
-                    Write-Host "[!] A RESTART IS REQUIRED for the new computer name to take effect." -ForegroundColor Yellow
-                    Write-ITLog -Action "Rename Computer" -Result "Success: OldName=$env:COMPUTERNAME, NewName=$newName" -Level "SUCCESS"
-                } catch {
-                    Write-Host "[-] Failed to rename computer: $($_.Exception.Message)" -ForegroundColor Red
-                    Write-ITLog -Action "Rename Computer" -Result "Failed: $($_.Exception.Message)" -Level "ERROR"
-                }
-            }
+        $process = Start-Process -FilePath $installerPath -ArgumentList "/silent /install" -Wait -PassThru -NoNewWindow
+        if ($process.ExitCode -eq 0) {
+            Write-Host "[+] Google Chrome installed successfully!" -ForegroundColor Green
+            Write-ITLog -Action "Chrome Installation" -Result "Completed Successfully (ExitCode: 0)" -Level "SUCCESS"
+            return $true
+        } else {
+            Write-Host "[!] Chrome installer returned code: $($process.ExitCode)" -ForegroundColor Yellow
+            Write-ITLog -Action "Chrome Installation" -Result "Exit code: $($process.ExitCode)" -Level "WARNING"
+            return $false
         }
     } catch {
-        Write-Host "[-] Failed to retrieve device information: $($_.Exception.Message)" -ForegroundColor Red
-        Write-ITLog -Action "Query Device Information" -Result "Error: $($_.Exception.Message)" -Level "ERROR"
-    }
-
-    Write-Host ""
-    Read-Host "Press Enter to return to main menu..."
-}
-
-# ==============================================================================
-# OPTION 2: INSTALL OPENVPN CLIENT
-# ==============================================================================
-function Install-OpenVPN {
-    Clear-Host
-    Write-Host "=================================================" -ForegroundColor Cyan
-    Write-Host "            INSTALL OPENVPN CLIENT               " -ForegroundColor Yellow
-    Write-Host "=================================================" -ForegroundColor Cyan
-
-    $downloadUrl = "$Script:BaseRawUrl/Software/OpenVPN.msi"
-    $installerPath = "$Script:TempDir\OpenVPN.msi"
-
-    Write-ITLog -Action "OpenVPN Installation" -Result "Started" -Level "INFO"
-    
-    $downloadSuccess = Download-FileWithProgress -Url $downloadUrl -DestinationPath $installerPath -DisplayName "OpenVPN Installer (MSI)"
-    if (-not $downloadSuccess) {
-        # Fallback to OpenVPN.exe if .msi is not available
-        $downloadUrl = "$Script:BaseRawUrl/Software/OpenVPN.exe"
-        $installerPath = "$Script:TempDir\OpenVPN.exe"
-        $downloadSuccess = Download-FileWithProgress -Url $downloadUrl -DestinationPath $installerPath -DisplayName "OpenVPN Installer (EXE)"
-    }
-
-    if (-not $downloadSuccess) {
-        Write-Host "[-] Installation aborted due to download failure." -ForegroundColor Red
-        Read-Host "Press Enter to continue..."
-        return
-    }
-
-    Write-Host "[*] Executing silent installation (Please wait)..." -ForegroundColor Cyan
-    try {
-        if ($installerPath.EndsWith(".msi", [System.StringComparison]::OrdinalIgnoreCase)) {
-            $process = Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$installerPath`" /qn /norestart REBOOT=ReallySuppress" -Wait -PassThru -NoNewWindow
-        } else {
-            # OpenVPN community / inno / nsis installers standard silent flag is /S
-            $process = Start-Process -FilePath $installerPath -ArgumentList "/S" -Wait -PassThru -NoNewWindow
-        }
-        
-        if ($process.ExitCode -eq 0 -or $process.ExitCode -eq 3010) {
-            Write-Host "[+] OpenVPN successfully installed!" -ForegroundColor Green
-            Write-ITLog -Action "OpenVPN Installation" -Result "Completed Successfully (ExitCode: $($process.ExitCode))" -Level "SUCCESS"
-        } else {
-            Write-Host "[!] OpenVPN installer finished with exit code: $($process.ExitCode)" -ForegroundColor Yellow
-            Write-ITLog -Action "OpenVPN Installation" -Result "Completed with warning (ExitCode: $($process.ExitCode))" -Level "WARNING"
-        }
-
-        # Auto-import VPN configuration profile
-        Import-OpenVPNConfig -ProfileName "Carrybee-IPTSP-BOL.ovpn"
-
-    } catch {
-        Write-Host "[-] OpenVPN installation failed: $($_.Exception.Message)" -ForegroundColor Red
-        Write-ITLog -Action "OpenVPN Installation" -Result "Failed: $($_.Exception.Message)" -Level "ERROR"
+        Write-Host "[-] Chrome installation failed: $($_.Exception.Message)" -ForegroundColor Red
+        Write-ITLog -Action "Chrome Installation" -Result "Failed: $($_.Exception.Message)" -Level "ERROR"
+        return $false
     } finally {
-        if (Test-Path -Path $installerPath) {
-            Remove-Item -Path $installerPath -Force -ErrorAction SilentlyContinue
-        }
+        if (Test-Path $installerPath) { Remove-Item $installerPath -Force -ErrorAction SilentlyContinue }
     }
+}
 
+function Install-MozillaFirefoxInternal {
+    $downloadUrl = "https://download.mozilla.org/?product=firefox-latest-ssl&os=win64&lang=en-US"
+    $installerPath = "$Script:TempDir\FirefoxSetup.exe"
+
+    Write-ITLog -Action "Firefox Installation" -Result "Started" -Level "INFO"
+
+    $downloadSuccess = Download-FileWithProgress -Url $downloadUrl -DestinationPath $installerPath -DisplayName "Mozilla Firefox 64-bit"
+    if (-not $downloadSuccess) { return $false }
+
+    Write-Host "[*] Installing Mozilla Firefox silently..." -ForegroundColor Cyan
+    try {
+        $process = Start-Process -FilePath $installerPath -ArgumentList "-ms" -Wait -PassThru -NoNewWindow
+        if ($process.ExitCode -eq 0) {
+            Write-Host "[+] Mozilla Firefox installed successfully!" -ForegroundColor Green
+            Write-ITLog -Action "Firefox Installation" -Result "Completed Successfully (ExitCode: 0)" -Level "SUCCESS"
+            return $true
+        } else {
+            Write-Host "[!] Firefox installer returned code: $($process.ExitCode)" -ForegroundColor Yellow
+            Write-ITLog -Action "Firefox Installation" -Result "Exit code: $($process.ExitCode)" -Level "WARNING"
+            return $false
+        }
+    } catch {
+        Write-Host "[-] Firefox installation failed: $($_.Exception.Message)" -ForegroundColor Red
+        Write-ITLog -Action "Firefox Installation" -Result "Failed: $($_.Exception.Message)" -Level "ERROR"
+        return $false
+    } finally {
+        if (Test-Path $installerPath) { Remove-Item $installerPath -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+function Menu-InstallBrowsers {
+    Clear-Host
+    Write-Host "=================================================" -ForegroundColor Cyan
+    Write-Host "          INSTALL WEB BROWSERS BUNDLE            " -ForegroundColor Yellow
+    Write-Host "=================================================" -ForegroundColor Cyan
+    Write-Host "Installing Google Chrome and Mozilla Firefox..." -ForegroundColor Gray
+    Write-Host ""
+    Install-GoogleChromeInternal | Out-Null
+    Write-Host ""
+    Install-MozillaFirefoxInternal | Out-Null
     Write-Host ""
     Read-Host "Press Enter to return to main menu..."
 }
 
-function Import-OpenVPNConfig {
-    <#
-    .SYNOPSIS
-        Downloads and automatically imports the specified OVPN profile into OpenVPN.
-    #>
-    param (
-        [string]$ProfileName = "Carrybee-IPTSP-BOL.ovpn"
-    )
+# ==============================================================================
+# [2] INSTALL VOIP & VPN (MICROSIP & OPENVPN + PROFILE)
+# ==============================================================================
+function Install-MicroSIPInternal {
+    $downloadUrl = "$Script:BaseRawUrl/Software/MicroSIP.exe"
+    $installerPath = "$Script:TempDir\MicroSIP.exe"
+
+    Write-ITLog -Action "MicroSIP Installation" -Result "Started" -Level "INFO"
+
+    $downloadSuccess = Download-FileWithProgress -Url $downloadUrl -DestinationPath $installerPath -DisplayName "MicroSIP VoIP Client"
+    if (-not $downloadSuccess) { return $false }
+
+    Write-Host "[*] Installing MicroSIP silently..." -ForegroundColor Cyan
+    try {
+        $process = Start-Process -FilePath $installerPath -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART" -Wait -PassThru -NoNewWindow
+        if ($process.ExitCode -eq 0) {
+            Write-Host "[+] MicroSIP successfully installed!" -ForegroundColor Green
+            Write-ITLog -Action "MicroSIP Installation" -Result "Completed Successfully" -Level "SUCCESS"
+            return $true
+        } else {
+            Write-Host "[!] MicroSIP finished with code: $($process.ExitCode)" -ForegroundColor Yellow
+            Write-ITLog -Action "MicroSIP Installation" -Result "Exit code: $($process.ExitCode)" -Level "WARNING"
+            return $false
+        }
+    } catch {
+        Write-Host "[-] MicroSIP installation failed: $($_.Exception.Message)" -ForegroundColor Red
+        Write-ITLog -Action "MicroSIP Installation" -Result "Failed: $($_.Exception.Message)" -Level "ERROR"
+        return $false
+    } finally {
+        if (Test-Path $installerPath) { Remove-Item $installerPath -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+function Import-OpenVPNConfigInternal {
+    param ([string]$ProfileName = "Carrybee-IPTSP-BOL.ovpn")
 
     Write-Host ""
     Write-Host "[*] Configuring OpenVPN Profile ($ProfileName)..." -ForegroundColor Cyan
@@ -313,11 +269,7 @@ function Import-OpenVPNConfig {
     $ovpnLocalPath = "$Script:CompanyDir\$ProfileName"
 
     $downloadSuccess = Download-FileWithProgress -Url $ovpnRemoteUrl -DestinationPath $ovpnLocalPath -DisplayName "VPN Profile ($ProfileName)"
-    if (-not $downloadSuccess) {
-        Write-Host "[!] Could not download VPN profile. Skipping import." -ForegroundColor Yellow
-        Write-ITLog -Action "Import OVPN Config" -Result "Failed download: $ProfileName" -Level "WARNING"
-        return
-    }
+    if (-not $downloadSuccess) { return $false }
 
     $imported = $false
 
@@ -341,9 +293,7 @@ function Import-OpenVPNConfig {
     if (Test-Path "$env:ProgramFiles\OpenVPN") {
         Write-Host "[*] OpenVPN Community detected. Copying profile to config folder..." -ForegroundColor Cyan
         try {
-            if (-not (Test-Path $communityConfigPath)) {
-                New-Item -Path $communityConfigPath -ItemType Directory -Force | Out-Null
-            }
+            if (-not (Test-Path $communityConfigPath)) { New-Item -Path $communityConfigPath -ItemType Directory -Force | Out-Null }
             Copy-Item -Path $ovpnLocalPath -Destination "$communityConfigPath\$ProfileName" -Force
             Write-Host "[+] Profile copied to $communityConfigPath\$ProfileName!" -ForegroundColor Green
             Write-ITLog -Action "Import OVPN Config" -Result "Copied to OpenVPN Community config" -Level "SUCCESS"
@@ -353,160 +303,157 @@ function Import-OpenVPNConfig {
         }
     }
 
-    if (-not $imported) {
-        Write-Host "[*] Profile saved locally to $ovpnLocalPath." -ForegroundColor Yellow
-    }
+    return $imported
 }
 
-# ==============================================================================
-# OPTION 3: INSTALL MICROSIP
-# ==============================================================================
-function Install-MicroSIP {
-    Clear-Host
-    Write-Host "=================================================" -ForegroundColor Cyan
-    Write-Host "               INSTALL MICROSIP                  " -ForegroundColor Yellow
-    Write-Host "=================================================" -ForegroundColor Cyan
+function Install-OpenVPNInternal {
+    $downloadUrl = "$Script:BaseRawUrl/Software/OpenVPN.msi"
+    $installerPath = "$Script:TempDir\OpenVPN.msi"
 
-    $downloadUrl = "$Script:BaseRawUrl/Software/MicroSIP.exe"
-    $installerPath = "$Script:TempDir\MicroSIP.exe"
-
-    Write-ITLog -Action "MicroSIP Installation" -Result "Started" -Level "INFO"
-
-    $downloadSuccess = Download-FileWithProgress -Url $downloadUrl -DestinationPath $installerPath -DisplayName "MicroSIP Installer"
+    Write-ITLog -Action "OpenVPN Installation" -Result "Started" -Level "INFO"
+    
+    $downloadSuccess = Download-FileWithProgress -Url $downloadUrl -DestinationPath $installerPath -DisplayName "OpenVPN Installer (MSI)"
     if (-not $downloadSuccess) {
-        Write-Host "[-] Installation aborted due to download failure." -ForegroundColor Red
-        Read-Host "Press Enter to continue..."
-        return
+        $downloadUrl = "$Script:BaseRawUrl/Software/OpenVPN.exe"
+        $installerPath = "$Script:TempDir\OpenVPN.exe"
+        $downloadSuccess = Download-FileWithProgress -Url $downloadUrl -DestinationPath $installerPath -DisplayName "OpenVPN Installer (EXE)"
     }
 
-    Write-Host "[*] Executing silent installation (/VERYSILENT /NORESTART)..." -ForegroundColor Cyan
+    if (-not $downloadSuccess) { return $false }
+
+    Write-Host "[*] Executing silent installation..." -ForegroundColor Cyan
     try {
-        # MicroSIP is built with Inno Setup. Silent flags: /VERYSILENT /SUPPRESSMSGBOXES /NORESTART or /S
-        $process = Start-Process -FilePath $installerPath -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART" -Wait -PassThru -NoNewWindow
+        if ($installerPath.EndsWith(".msi", [System.StringComparison]::OrdinalIgnoreCase)) {
+            $process = Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$installerPath`" /qn /norestart REBOOT=ReallySuppress" -Wait -PassThru -NoNewWindow
+        } else {
+            $process = Start-Process -FilePath $installerPath -ArgumentList "/S" -Wait -PassThru -NoNewWindow
+        }
         
-        if ($process.ExitCode -eq 0) {
-            Write-Host "[+] MicroSIP successfully installed!" -ForegroundColor Green
-            Write-ITLog -Action "MicroSIP Installation" -Result "Completed Successfully (ExitCode: 0)" -Level "SUCCESS"
+        if ($process.ExitCode -eq 0 -or $process.ExitCode -eq 3010) {
+            Write-Host "[+] OpenVPN successfully installed!" -ForegroundColor Green
+            Write-ITLog -Action "OpenVPN Installation" -Result "Completed Successfully (ExitCode: $($process.ExitCode))" -Level "SUCCESS"
         } else {
-            Write-Host "[!] MicroSIP installer finished with exit code: $($process.ExitCode)" -ForegroundColor Yellow
-            Write-ITLog -Action "MicroSIP Installation" -Result "Finished with exit code: $($process.ExitCode)" -Level "WARNING"
+            Write-Host "[!] OpenVPN finished with warning code: $($process.ExitCode)" -ForegroundColor Yellow
+            Write-ITLog -Action "OpenVPN Installation" -Result "Warning code: $($process.ExitCode)" -Level "WARNING"
         }
-    } catch {
-        Write-Host "[-] MicroSIP installation failed: $($_.Exception.Message)" -ForegroundColor Red
-        Write-ITLog -Action "MicroSIP Installation" -Result "Failed: $($_.Exception.Message)" -Level "ERROR"
-    } finally {
-        if (Test-Path -Path $installerPath) {
-            Remove-Item -Path $installerPath -Force -ErrorAction SilentlyContinue
-        }
-    }
 
-    Write-Host ""
-    Read-Host "Press Enter to return to main menu..."
+        # Auto-import OVPN profile
+        Import-OpenVPNConfigInternal -ProfileName "Carrybee-IPTSP-BOL.ovpn" | Out-Null
+        return $true
+    } catch {
+        Write-Host "[-] OpenVPN installation failed: $($_.Exception.Message)" -ForegroundColor Red
+        Write-ITLog -Action "OpenVPN Installation" -Result "Failed: $($_.Exception.Message)" -Level "ERROR"
+        return $false
+    } finally {
+        if (Test-Path $installerPath) { Remove-Item $installerPath -Force -ErrorAction SilentlyContinue }
+    }
 }
 
-# ==============================================================================
-# OPTION 4: INSTALL GOOGLE CHROME ENTERPRISE
-# ==============================================================================
-function Install-GoogleChrome {
+function Menu-InstallVoipAndVpn {
     Clear-Host
     Write-Host "=================================================" -ForegroundColor Cyan
-    Write-Host "            INSTALL GOOGLE CHROME                " -ForegroundColor Yellow
+    Write-Host "         INSTALL VOIP & VPN BUNDLE               " -ForegroundColor Yellow
     Write-Host "=================================================" -ForegroundColor Cyan
-
-    # Official Google Chrome Enterprise 64-bit MSI Installer URL
-    $downloadUrl = "https://dl.google.com/chrome/install/latest/chrome_installer.exe"
-    $installerPath = "$Script:TempDir\chrome_installer.exe"
-
-    Write-ITLog -Action "Chrome Installation" -Result "Started" -Level "INFO"
-
-    $downloadSuccess = Download-FileWithProgress -Url $downloadUrl -DestinationPath $installerPath -DisplayName "Google Chrome Installer"
-    if (-not $downloadSuccess) {
-        Write-Host "[-] Aborting Chrome installation." -ForegroundColor Red
-        Read-Host "Press Enter to continue..."
-        return
-    }
-
-    Write-Host "[*] Installing Google Chrome silently (/silent /install)..." -ForegroundColor Cyan
-    try {
-        $process = Start-Process -FilePath $installerPath -ArgumentList "/silent /install" -Wait -PassThru -NoNewWindow
-
-        if ($process.ExitCode -eq 0) {
-            Write-Host "[+] Google Chrome installed successfully!" -ForegroundColor Green
-            Write-ITLog -Action "Chrome Installation" -Result "Completed Successfully (ExitCode: 0)" -Level "SUCCESS"
-        } else {
-            Write-Host "[!] Chrome installer finished with exit code: $($process.ExitCode)" -ForegroundColor Yellow
-            Write-ITLog -Action "Chrome Installation" -Result "Exited with code: $($process.ExitCode)" -Level "WARNING"
-        }
-    } catch {
-        Write-Host "[-] Chrome installation failed: $($_.Exception.Message)" -ForegroundColor Red
-        Write-ITLog -Action "Chrome Installation" -Result "Failed: $($_.Exception.Message)" -Level "ERROR"
-    } finally {
-        if (Test-Path -Path $installerPath) {
-            Remove-Item -Path $installerPath -Force -ErrorAction SilentlyContinue
-        }
-    }
-
+    Write-Host "Installing MicroSIP and OpenVPN with Carrybee profile..." -ForegroundColor Gray
+    Write-Host ""
+    Install-MicroSIPInternal | Out-Null
+    Write-Host ""
+    Install-OpenVPNInternal | Out-Null
     Write-Host ""
     Read-Host "Press Enter to return to main menu..."
 }
 
 # ==============================================================================
-# OPTION 5: INSTALL MOZILLA FIREFOX
+# [3] INSTALL REMOTE SUPPORT (ANYDESK & ULTRAVIEWER)
 # ==============================================================================
-function Install-MozillaFirefox {
+function Install-AnyDeskInternal {
+    $downloadUrl = "$Script:BaseRawUrl/Software/AnyDesk.exe"
+    $installerPath = "$Script:TempDir\AnyDesk.exe"
+
+    Write-ITLog -Action "AnyDesk Installation" -Result "Started" -Level "INFO"
+
+    $downloadSuccess = Download-FileWithProgress -Url $downloadUrl -DestinationPath $installerPath -DisplayName "AnyDesk Remote Support"
+    if (-not $downloadSuccess) { return $false }
+
+    Write-Host "[*] Installing AnyDesk silently..." -ForegroundColor Cyan
+    try {
+        $targetProgFiles = ${env:ProgramFiles(x86)}
+        if ([string]::IsNullOrWhiteSpace($targetProgFiles)) { $targetProgFiles = $env:ProgramFiles }
+        $installLocation = Join-Path $targetProgFiles 'AnyDesk'
+
+        $process = Start-Process -FilePath $installerPath -ArgumentList "--install `"$installLocation`" --start-with-win --silent" -Wait -PassThru -NoNewWindow
+        if ($process.ExitCode -eq 0) {
+            Write-Host "[+] AnyDesk installed successfully!" -ForegroundColor Green
+            Write-ITLog -Action "AnyDesk Installation" -Result "Completed Successfully" -Level "SUCCESS"
+            return $true
+        } else {
+            Write-Host "[!] AnyDesk finished with code: $($process.ExitCode)" -ForegroundColor Yellow
+            Write-ITLog -Action "AnyDesk Installation" -Result "Exit code: $($process.ExitCode)" -Level "WARNING"
+            return $false
+        }
+    } catch {
+        Write-Host "[-] AnyDesk installation failed: $($_.Exception.Message)" -ForegroundColor Red
+        Write-ITLog -Action "AnyDesk Installation" -Result "Failed: $($_.Exception.Message)" -Level "ERROR"
+        return $false
+    } finally {
+        if (Test-Path $installerPath) { Remove-Item $installerPath -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+function Install-UltraViewerInternal {
+    $downloadUrl = "$Script:BaseRawUrl/Software/UltraViewer.exe"
+    $installerPath = "$Script:TempDir\UltraViewer.exe"
+
+    Write-ITLog -Action "UltraViewer Installation" -Result "Started" -Level "INFO"
+
+    $downloadSuccess = Download-FileWithProgress -Url $downloadUrl -DestinationPath $installerPath -DisplayName "UltraViewer Support"
+    if (-not $downloadSuccess) { return $false }
+
+    Write-Host "[*] Installing UltraViewer silently..." -ForegroundColor Cyan
+    try {
+        $process = Start-Process -FilePath $installerPath -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART" -Wait -PassThru -NoNewWindow
+        if ($process.ExitCode -eq 0) {
+            Write-Host "[+] UltraViewer installed successfully!" -ForegroundColor Green
+            Write-ITLog -Action "UltraViewer Installation" -Result "Completed Successfully" -Level "SUCCESS"
+            return $true
+        } else {
+            Write-Host "[!] UltraViewer finished with code: $($process.ExitCode)" -ForegroundColor Yellow
+            Write-ITLog -Action "UltraViewer Installation" -Result "Exit code: $($process.ExitCode)" -Level "WARNING"
+            return $false
+        }
+    } catch {
+        Write-Host "[-] UltraViewer installation failed: $($_.Exception.Message)" -ForegroundColor Red
+        Write-ITLog -Action "UltraViewer Installation" -Result "Failed: $($_.Exception.Message)" -Level "ERROR"
+        return $false
+    } finally {
+        if (Test-Path $installerPath) { Remove-Item $installerPath -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+function Menu-InstallRemoteSupport {
     Clear-Host
     Write-Host "=================================================" -ForegroundColor Cyan
-    Write-Host "            INSTALL MOZILLA FIREFOX              " -ForegroundColor Yellow
+    Write-Host "         INSTALL REMOTE SUPPORT TOOLS            " -ForegroundColor Yellow
     Write-Host "=================================================" -ForegroundColor Cyan
-
-    # Official Mozilla direct 64-bit installer download endpoint
-    $downloadUrl = "https://download.mozilla.org/?product=firefox-latest-ssl&os=win64&lang=en-US"
-    $installerPath = "$Script:TempDir\FirefoxSetup.exe"
-
-    Write-ITLog -Action "Firefox Installation" -Result "Started" -Level "INFO"
-
-    $downloadSuccess = Download-FileWithProgress -Url $downloadUrl -DestinationPath $installerPath -DisplayName "Mozilla Firefox Installer"
-    if (-not $downloadSuccess) {
-        Write-Host "[-] Aborting Firefox installation." -ForegroundColor Red
-        Read-Host "Press Enter to continue..."
-        return
-    }
-
-    Write-Host "[*] Installing Mozilla Firefox silently (-ms)..." -ForegroundColor Cyan
-    try {
-        $process = Start-Process -FilePath $installerPath -ArgumentList "-ms" -Wait -PassThru -NoNewWindow
-
-        if ($process.ExitCode -eq 0) {
-            Write-Host "[+] Mozilla Firefox installed successfully!" -ForegroundColor Green
-            Write-ITLog -Action "Firefox Installation" -Result "Completed Successfully (ExitCode: 0)" -Level "SUCCESS"
-        } else {
-            Write-Host "[!] Firefox installer finished with exit code: $($process.ExitCode)" -ForegroundColor Yellow
-            Write-ITLog -Action "Firefox Installation" -Result "Exited with code: $($process.ExitCode)" -Level "WARNING"
-        }
-    } catch {
-        Write-Host "[-] Firefox installation failed: $($_.Exception.Message)" -ForegroundColor Red
-        Write-ITLog -Action "Firefox Installation" -Result "Failed: $($_.Exception.Message)" -Level "ERROR"
-    } finally {
-        if (Test-Path -Path $installerPath) {
-            Remove-Item -Path $installerPath -Force -ErrorAction SilentlyContinue
-        }
-    }
-
+    Write-Host "Installing AnyDesk and UltraViewer for Helpdesk access..." -ForegroundColor Gray
+    Write-Host ""
+    Install-AnyDeskInternal | Out-Null
+    Write-Host ""
+    Install-UltraViewerInternal | Out-Null
     Write-Host ""
     Read-Host "Press Enter to return to main menu..."
 }
 
 # ==============================================================================
-# OPTION 6: INSTALL DOTMAX PRINTER DRIVER (INTERACTIVE)
+# [4] INSTALL DOTMAX PRINTER DRIVER
 # ==============================================================================
-function Install-DotMaxDriver {
+function Menu-InstallDotMaxDriver {
     Clear-Host
     Write-Host "=================================================" -ForegroundColor Cyan
     Write-Host "       INSTALL DOTMAX PRINTER DRIVER             " -ForegroundColor Yellow
     Write-Host "=================================================" -ForegroundColor Cyan
 
     $fileName = "Driver software for Windows-72.exe"
-    # Proper URL-encoding for spaces and characters
     $encodedFileName = [System.Uri]::EscapeDataString($fileName)
     $downloadUrl = "$Script:BaseRawUrl/Software/$encodedFileName"
     $installerPath = "$Script:TempDir\$fileName"
@@ -526,18 +473,14 @@ function Install-DotMaxDriver {
     Write-Host "    Waiting for installation to finish..." -ForegroundColor Gray
 
     try {
-        # Interactive mode: do not pass silent switches, do not hide window
         $process = Start-Process -FilePath $installerPath -Wait -PassThru
-
-        Write-Host "[+] DotMAX Printer Driver setup process completed (Exit code: $($process.ExitCode))." -ForegroundColor Green
+        Write-Host "[+] DotMAX setup process completed (Exit code: $($process.ExitCode))." -ForegroundColor Green
         Write-ITLog -Action "DotMAX Driver Installation" -Result "Completed (ExitCode: $($process.ExitCode))" -Level "SUCCESS"
     } catch {
         Write-Host "[-] Failed to execute driver installer: $($_.Exception.Message)" -ForegroundColor Red
         Write-ITLog -Action "DotMAX Driver Installation" -Result "Failed: $($_.Exception.Message)" -Level "ERROR"
     } finally {
-        if (Test-Path -Path $installerPath) {
-            Remove-Item -Path $installerPath -Force -ErrorAction SilentlyContinue
-        }
+        if (Test-Path $installerPath) { Remove-Item $installerPath -Force -ErrorAction SilentlyContinue }
     }
 
     Write-Host ""
@@ -545,14 +488,9 @@ function Install-DotMaxDriver {
 }
 
 # ==============================================================================
-# OPTION 7: DOWNLOAD PRINT SERVER & CONFIGURE SECURITY
+# [5] DEPLOY PRINT SERVER & SECURITY RULES
 # ==============================================================================
-function Install-PrintServer {
-    Clear-Host
-    Write-Host "=================================================" -ForegroundColor Cyan
-    Write-Host "          CONFIGURE PRINT SERVER APP             " -ForegroundColor Yellow
-    Write-Host "=================================================" -ForegroundColor Cyan
-
+function Deploy-PrintServerInternal {
     $fileName = "PrintServer.exe"
     $downloadUrl = "$Script:BaseRawUrl/Software/$fileName"
     $targetFolder = $Script:CompanyDir
@@ -561,26 +499,15 @@ function Install-PrintServer {
 
     Write-ITLog -Action "PrintServer Deployment" -Result "Started" -Level "INFO"
 
-    # 1. Download
     $downloadSuccess = Download-FileWithProgress -Url $downloadUrl -DestinationPath $tempFile -DisplayName "Print Server Application"
-    if (-not $downloadSuccess) {
-        Write-Host "[-] Aborting Print Server deployment." -ForegroundColor Red
-        Read-Host "Press Enter to continue..."
-        return
-    }
+    if (-not $downloadSuccess) { return $false }
 
     try {
-        # 2. Ensure C:\CompanyTools folder exists
-        if (-not (Test-Path -Path $targetFolder)) {
-            New-Item -Path $targetFolder -ItemType Directory -Force | Out-Null
-            Write-Host "[+] Created directory: $targetFolder" -ForegroundColor Green
-        }
-
-        # 3. Copy file to destination
+        if (-not (Test-Path $targetFolder)) { New-Item -Path $targetFolder -ItemType Directory -Force | Out-Null }
         Copy-Item -Path $tempFile -Destination $targetFile -Force
         Write-Host "[+] Copied application to: $targetFile" -ForegroundColor Green
 
-        # 4. Create Desktop Shortcut
+        # Create Desktop Shortcut
         $desktopPath = [Environment]::GetFolderPath("Desktop")
         $shortcutPath = "$desktopPath\Print Server.lnk"
         
@@ -593,31 +520,21 @@ function Install-PrintServer {
         $shortcut.Save()
         Write-Host "[+] Created Desktop shortcut: $shortcutPath" -ForegroundColor Green
 
-        # 5. Add Windows Defender Exclusions
+        # Defender Exclusions
         Write-Host "[*] Adding Windows Defender exclusions..." -ForegroundColor Cyan
         try {
-            # Add exclusion for folder
             Add-MpPreference -ExclusionPath $targetFolder -ErrorAction Stop
-            # Add exclusion for file
             Add-MpPreference -ExclusionPath $targetFile -ErrorAction Stop
             Write-Host "[+] Windows Defender exclusions added for folder and executable." -ForegroundColor Green
             Write-ITLog -Action "Defender Exclusion" -Result "Added for $targetFolder and $targetFile" -Level "SUCCESS"
         } catch {
-            Write-Host "[!] Note: Could not update Windows Defender preferences ($($_.Exception.Message))." -ForegroundColor Yellow
-            Write-ITLog -Action "Defender Exclusion" -Result "Warning: $($_.Exception.Message)" -Level "WARNING"
+            Write-Host "[!] Defender exclusion update warning ($($_.Exception.Message))." -ForegroundColor Yellow
         }
 
-        # 6. Check Windows 11 Smart App Control (SAC)
+        # Windows 11 Smart App Control (SAC)
         $os = Get-CimInstance -ClassName Win32_OperatingSystem
-        $buildNumber = [int]$os.BuildNumber
-        
-        # Build 22000+ is Windows 11
-        if ($buildNumber -ge 22000) {
+        if ([int]$os.BuildNumber -ge 22000) {
             Write-Host "[*] Windows 11 detected. Checking Smart App Control state..." -ForegroundColor Cyan
-            
-            # Smart App Control state is stored in registry:
-            # HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy -> VerifiedAndReputablePolicyState
-            # 0 = Off, 1 = Enforced (On), 2 = Evaluation
             $sacState = 0
             $regPath = "HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy"
             if (Test-Path $regPath) {
@@ -634,30 +551,93 @@ function Install-PrintServer {
                 Write-Host "              SMART APP CONTROL NOTICE                      " -ForegroundColor Yellow
                 Write-Host "============================================================" -ForegroundColor Red
                 Write-Host "Smart App Control is currently $sacStatusDesc." -ForegroundColor Yellow
-                Write-Host "Windows requires manual disabling by the administrator:" -ForegroundColor White
-                Write-Host "  Settings" -ForegroundColor Cyan
-                Write-Host "  -> Privacy & Security" -ForegroundColor Cyan
-                Write-Host "  -> Windows Security" -ForegroundColor Cyan
-                Write-Host "  -> App & Browser Control" -ForegroundColor Cyan
-                Write-Host "  -> Smart App Control" -ForegroundColor Cyan
+                Write-Host "If Print Server is blocked, manually disable SAC:" -ForegroundColor White
+                Write-Host "  Settings -> Privacy & Security -> Windows Security" -ForegroundColor Cyan
+                Write-Host "  -> App & Browser Control -> Smart App Control" -ForegroundColor Cyan
                 Write-Host "============================================================" -ForegroundColor Red
-                Write-ITLog -Action "Smart App Control Check" -Result "Active ($sacState). Manual disable required if blocked." -Level "WARNING"
-            } else {
-                Write-Host "[+] Smart App Control is not enforced or disabled." -ForegroundColor Green
             }
         }
 
         Write-ITLog -Action "PrintServer Deployment" -Result "Completed Successfully" -Level "SUCCESS"
-        Write-Host ""
         Write-Host "[+] Print Server successfully configured!" -ForegroundColor Green
-
+        return $true
     } catch {
         Write-Host "[-] Error deploying Print Server: $($_.Exception.Message)" -ForegroundColor Red
         Write-ITLog -Action "PrintServer Deployment" -Result "Failed: $($_.Exception.Message)" -Level "ERROR"
+        return $false
     } finally {
-        if (Test-Path -Path $tempFile) {
-            Remove-Item -Path $tempFile -Force -ErrorAction SilentlyContinue
+        if (Test-Path $tempFile) { Remove-Item $tempFile -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+function Menu-DeployPrintServer {
+    Clear-Host
+    Write-Host "=================================================" -ForegroundColor Cyan
+    Write-Host "          CONFIGURE PRINT SERVER APP             " -ForegroundColor Yellow
+    Write-Host "=================================================" -ForegroundColor Cyan
+    Deploy-PrintServerInternal | Out-Null
+    Write-Host ""
+    Read-Host "Press Enter to return to main menu..."
+}
+
+# ==============================================================================
+# [6] DEVICE INFORMATION & RENAME
+# ==============================================================================
+function Menu-ShowDeviceInformation {
+    Clear-Host
+    Write-Host "=================================================" -ForegroundColor Cyan
+    Write-Host "              DEVICE INFORMATION                 " -ForegroundColor Yellow
+    Write-Host "=================================================" -ForegroundColor Cyan
+
+    Write-Host "[*] Querying system components..." -ForegroundColor Gray
+    try {
+        $cs      = Get-CimInstance -ClassName Win32_ComputerSystem
+        $os      = Get-CimInstance -ClassName Win32_OperatingSystem
+        $bios    = Get-CimInstance -ClassName Win32_BIOS
+        $cpu     = Get-CimInstance -ClassName Win32_Processor | Select-Object -First 1
+        $ramGB   = [math]::Round(($cs.TotalPhysicalMemory / 1GB), 2)
+        
+        $netConfigs = Get-CimInstance -ClassName Win32_NetworkAdapterConfiguration | Where-Object { $_.IPEnabled -eq $true }
+        $ipList  = ($netConfigs.IPAddress | Where-Object { $_ -match '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$' }) -join ", "
+        $macList = ($netConfigs.MACAddress) -join ", "
+
+        $displayIp = if ($ipList) { $ipList } else { "N/A" }
+        $displayMac = if ($macList) { $macList } else { "N/A" }
+
+        Write-Host "Computer Name:       " -NoNewline; Write-Host $env:COMPUTERNAME -ForegroundColor Green
+        Write-Host "BIOS Serial Number:  " -NoNewline; Write-Host $bios.SerialNumber -ForegroundColor Green
+        Write-Host "Manufacturer:        " -NoNewline; Write-Host $cs.Manufacturer -ForegroundColor White
+        Write-Host "Model:               " -NoNewline; Write-Host $cs.Model -ForegroundColor White
+        Write-Host "CPU:                 " -NoNewline; Write-Host $cpu.Name.Trim() -ForegroundColor White
+        Write-Host "RAM:                 " -NoNewline; Write-Host "$ramGB GB" -ForegroundColor White
+        Write-Host "Windows Edition:     " -NoNewline; Write-Host $os.Caption -ForegroundColor White
+        Write-Host "Windows Version:     " -NoNewline; Write-Host "$($os.Version) (Build $($os.BuildNumber))" -ForegroundColor White
+        Write-Host "Current Username:    " -NoNewline; Write-Host "$env:USERDOMAIN\$env:USERNAME" -ForegroundColor White
+        Write-Host "IP Address:          " -NoNewline; Write-Host $displayIp -ForegroundColor Yellow
+        Write-Host "MAC Address:         " -NoNewline; Write-Host $displayMac -ForegroundColor Yellow
+        Write-Host "=================================================" -ForegroundColor Cyan
+
+        Write-ITLog -Action "Query Device Information" -Result "Success (Host: $env:COMPUTERNAME)" -Level "INFO"
+
+        Write-Host ""
+        $renameChoice = Read-Host "Do you want to change computer name? (Y/N)"
+        if ($renameChoice -match '^[Yy]$') {
+            $newName = Read-Host "Enter new computer name (max 15 characters, no spaces)"
+            if ([string]::IsNullOrWhiteSpace($newName) -or $newName.Length -gt 15) {
+                Write-Host "[-] Invalid name (must be 1-15 characters). Aborted." -ForegroundColor Red
+            } else {
+                try {
+                    Rename-Computer -NewName $newName -Force -ErrorAction Stop
+                    Write-Host "[+] Computer successfully renamed to '$newName'." -ForegroundColor Green
+                    Write-Host "[!] A RESTART IS REQUIRED for the change to take effect." -ForegroundColor Yellow
+                    Write-ITLog -Action "Rename Computer" -Result "Renamed to $newName" -Level "SUCCESS"
+                } catch {
+                    Write-Host "[-] Failed to rename computer: $($_.Exception.Message)" -ForegroundColor Red
+                }
+            }
         }
+    } catch {
+        Write-Host "[-] Failed to retrieve device info: $($_.Exception.Message)" -ForegroundColor Red
     }
 
     Write-Host ""
@@ -665,14 +645,191 @@ function Install-PrintServer {
 }
 
 # ==============================================================================
-# OPTION 8: EXPORT PC INFORMATION REPORT
+# [7] NETWORK DIAGNOSTICS & CONNECTIVITY SUITE
 # ==============================================================================
-function Export-PCReport {
+function Menu-NetworkDiagnostics {
     Clear-Host
     Write-Host "=================================================" -ForegroundColor Cyan
-    Write-Host "         EXPORT PC INVENTORY REPORT              " -ForegroundColor Yellow
+    Write-Host "       NETWORK DIAGNOSTICS & HEALTH SUITE        " -ForegroundColor Yellow
     Write-Host "=================================================" -ForegroundColor Cyan
 
+    # 1. Local Adapters
+    Write-Host "[*] Active Network Adapters:" -ForegroundColor Cyan
+    $adapters = Get-CimInstance -ClassName Win32_NetworkAdapterConfiguration | Where-Object { $_.IPEnabled -eq $true }
+    foreach ($adapter in $adapters) {
+        $ip = ($adapter.IPAddress | Where-Object { $_ -match '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$' }) -join ", "
+        $gw = $adapter.DefaultIPGateway -join ", "
+        $dns = $adapter.DNSServerSearchOrder -join ", "
+        Write-Host "  - $($adapter.Description)" -ForegroundColor White
+        Write-Host "    IPv4: $ip | Gateway: $gw | DNS: $dns" -ForegroundColor Gray
+    }
+
+    Write-Host ""
+    Write-Host "[*] Running Connectivity Tests..." -ForegroundColor Cyan
+
+    # Ping Gateway
+    $gateway = ($adapters | Where-Object { $_.DefaultIPGateway } | Select-Object -First 1).DefaultIPGateway[0]
+    if ($gateway) {
+        $gwTest = Test-Connection -ComputerName $gateway -Count 2 -Quiet -ErrorAction SilentlyContinue
+        Write-Host "  Default Gateway ($gateway): " -NoNewline
+        if ($gwTest) { Write-Host "[ONLINE]" -ForegroundColor Green } else { Write-Host "[OFFLINE / NO REPLY]" -ForegroundColor Red }
+    }
+
+    # Ping Google DNS
+    $internetTest = Test-Connection -ComputerName "8.8.8.8" -Count 2 -Quiet -ErrorAction SilentlyContinue
+    Write-Host "  Internet Ping (8.8.8.8):       " -NoNewline
+    if ($internetTest) { Write-Host "[ONLINE]" -ForegroundColor Green } else { Write-Host "[OFFLINE]" -ForegroundColor Red }
+
+    # Test DNS Resolution
+    Write-Host "  DNS Resolution (google.com):   " -NoNewline
+    try {
+        $resolved = [System.Net.Dns]::GetHostAddresses("google.com")
+        if ($resolved) { Write-Host "[SUCCESS: $($resolved[0].IPAddressToString)]" -ForegroundColor Green }
+    } catch {
+        Write-Host "[FAILED]" -ForegroundColor Red
+    }
+
+    # Public IP
+    Write-Host "  Public IP Address:             " -NoNewline
+    try {
+        $publicIp = (Invoke-RestMethod -Uri "https://api.ipify.org" -TimeoutSec 5 -ErrorAction Stop).Trim()
+        Write-Host "[$publicIp]" -ForegroundColor Yellow
+    } catch {
+        Write-Host "[Unable to reach ipify]" -ForegroundColor Gray
+    }
+
+    Write-Host "=================================================" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "Quick Fix Actions:" -ForegroundColor White
+    Write-Host "  1. Flush DNS & Renew DHCP IP"
+    Write-Host "  2. Full Network Stack Reset (Winsock + TCP/IP)"
+    Write-Host "  3. Return to Main Menu"
+    $netChoice = Read-Host "Select an action [1-3]"
+
+    switch ($netChoice.Trim()) {
+        "1" {
+            Write-Host "`n[*] Flushing DNS cache..." -ForegroundColor Cyan
+            Clear-DnsClientCache -ErrorAction SilentlyContinue
+            ipconfig /flushdns | Out-Null
+            Write-Host "[*] Re-registering DNS..." -ForegroundColor Cyan
+            ipconfig /registerdns | Out-Null
+            Write-Host "[+] DNS Cache flushed and re-registered!" -ForegroundColor Green
+            Write-ITLog -Action "Network Flush" -Result "Flushed DNS and renewed DHCP" -Level "SUCCESS"
+            Start-Sleep -Seconds 2
+        }
+        "2" {
+            Write-Host "`n[*] Resetting Winsock & TCP/IP stack..." -ForegroundColor Cyan
+            netsh winsock reset | Out-Null
+            netsh int ip reset | Out-Null
+            Write-Host "[+] Network stack reset complete! (Restart recommended)" -ForegroundColor Green
+            Write-ITLog -Action "Network Reset" -Result "Executed netsh winsock & int ip reset" -Level "SUCCESS"
+            Start-Sleep -Seconds 2
+        }
+    }
+}
+
+# ==============================================================================
+# [8] WINDOWS OS REPAIR & CLEANUP (SFC, DISM, TEMP CLEAN)
+# ==============================================================================
+function Menu-SystemRepairAndCleanup {
+    Clear-Host
+    Write-Host "=================================================" -ForegroundColor Cyan
+    Write-Host "      WINDOWS OS REPAIR & MAINTENANCE SUITE      " -ForegroundColor Yellow
+    Write-Host "=================================================" -ForegroundColor Cyan
+    Write-Host "  1. Deep Temp & Windows Update Cache Cleanup"
+    Write-Host "  2. Check Hardware & SSD S.M.A.R.T. Health"
+    Write-Host "  3. Run System File Checker (sfc /scannow)"
+    Write-Host "  4. Run DISM Component Store Repair"
+    Write-Host "  5. Return to Main Menu"
+    Write-Host "=================================================" -ForegroundColor Cyan
+
+    $opt = Read-Host "Select an option [1-5]"
+    switch ($opt.Trim()) {
+        "1" {
+            Write-Host "`n[*] Purging Temporary Files..." -ForegroundColor Cyan
+            $tempPaths = @(
+                "$env:TEMP\*",
+                "C:\Windows\Temp\*",
+                "C:\Windows\SoftwareDistribution\Download\*"
+            )
+            foreach ($path in $tempPaths) {
+                try {
+                    Remove-Item -Path $path -Recurse -Force -ErrorAction SilentlyContinue | Out-Null
+                } catch {}
+            }
+            Write-Host "[+] Cache and temporary folders purged!" -ForegroundColor Green
+            Write-ITLog -Action "Temp Cleanup" -Result "Cleared Windows and User Temp directories" -Level "SUCCESS"
+            Start-Sleep -Seconds 2
+        }
+        "2" {
+            Write-Host "`n[*] Checking Physical Storage Disks..." -ForegroundColor Cyan
+            try {
+                Get-PhysicalDisk | Select-Object DeviceId, FriendlyName, MediaType, OperationalStatus, HealthStatus | Format-Table -AutoSize
+            } catch {
+                Write-Host "[-] Could not query disk health: $($_.Exception.Message)" -ForegroundColor Red
+            }
+            Read-Host "`nPress Enter to continue..."
+        }
+        "3" {
+            Write-Host "`n[*] Executing SFC scan (This may take several minutes)..." -ForegroundColor Cyan
+            Start-Process -FilePath "sfc.exe" -ArgumentList "/scannow" -Wait -NoNewWindow
+            Write-ITLog -Action "SFC Scan" -Result "Completed" -Level "INFO"
+            Read-Host "`nPress Enter to continue..."
+        }
+        "4" {
+            Write-Host "`n[*] Executing DISM Health Restoration (Please wait)..." -ForegroundColor Cyan
+            Start-Process -FilePath "DISM.exe" -ArgumentList "/Online /Cleanup-Image /RestoreHealth" -Wait -NoNewWindow
+            Write-ITLog -Action "DISM Repair" -Result "Completed" -Level "INFO"
+            Read-Host "`nPress Enter to continue..."
+        }
+    }
+}
+
+# ==============================================================================
+# [9] WINDOWS DEBLOAT & PERFORMANCE TWEAKS
+# ==============================================================================
+function Optimize-WindowsPerformanceInternal {
+    Write-Host "[*] Applying High Performance Power Scheme..." -ForegroundColor Cyan
+    try {
+        # High Performance GUID
+        powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
+        Write-Host "[+] Power scheme set to High Performance." -ForegroundColor Green
+    } catch {
+        Write-Host "[!] Could not set High Performance plan." -ForegroundColor Yellow
+    }
+
+    Write-Host "[*] Resynchronizing System Time (NTP)..." -ForegroundColor Cyan
+    try {
+        Start-Service w32time -ErrorAction SilentlyContinue
+        w32tm /resync /force | Out-Null
+        Write-Host "[+] System clock successfully synchronized." -ForegroundColor Green
+    } catch {
+        Write-Host "[!] Could not resync clock ($($_.Exception.Message))." -ForegroundColor Yellow
+    }
+
+    Write-Host "[*] Removing consumer bloatware packages..." -ForegroundColor Cyan
+    $bloatPatterns = @("*XboxApp*", "*Solitaire*", "*bingweather*", "*ZuneVideo*", "*GetHelp*", "*MicrosoftStickyNotes*")
+    foreach ($pattern in $bloatPatterns) {
+        Get-AppxPackage -AllUsers $pattern -ErrorAction SilentlyContinue | Remove-AppxPackage -AllUsers -ErrorAction SilentlyContinue
+    }
+    Write-Host "[+] Consumer bloatware packages removed." -ForegroundColor Green
+    Write-ITLog -Action "Performance Tuning" -Result "Applied power plan, NTP sync, and Appx debloat" -Level "SUCCESS"
+}
+
+function Menu-WindowsTweaks {
+    Clear-Host
+    Write-Host "=================================================" -ForegroundColor Cyan
+    Write-Host "        WINDOWS PERFORMANCE & DEBLOAT            " -ForegroundColor Yellow
+    Write-Host "=================================================" -ForegroundColor Cyan
+    Optimize-WindowsPerformanceInternal
+    Write-Host ""
+    Read-Host "Press Enter to return to main menu..."
+}
+
+# ==============================================================================
+# [10] EXPORT PC INFORMATION REPORT
+# ==============================================================================
+function Export-PCReportInternal {
     $desktopPath = [Environment]::GetFolderPath("Desktop")
     $sanitizedPcName = $env:COMPUTERNAME -replace '[\\/:*?"<>|]', '_'
     $reportFilePath = "$desktopPath\$sanitizedPcName-Report.txt"
@@ -686,21 +843,18 @@ function Export-PCReport {
         $cpu     = Get-CimInstance -ClassName Win32_Processor | Select-Object -First 1
         $ramGB   = [math]::Round(($cs.TotalPhysicalMemory / 1GB), 2)
         
-        # Disk Information
         $disks   = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DriveType=3" | ForEach-Object {
             $free = [math]::Round(($_.FreeSpace / 1GB), 2)
             $size = [math]::Round(($_.Size / 1GB), 2)
             "$($_.DeviceID) ($free GB free of $size GB)"
         }
 
-        # Network details
         $netConfigs = Get-CimInstance -ClassName Win32_NetworkAdapterConfiguration | Where-Object { $_.IPEnabled -eq $true }
         $netDetails = $netConfigs | ForEach-Object {
             $ipv4 = ($_.IPAddress | Where-Object { $_ -match '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$' }) -join ", "
             "Adapter: $($_.Description)`n  MAC: $($_.MACAddress)`n  IPv4: $ipv4`n  Gateway: $($_.DefaultIPGateway -join ', ')`n  DNS: $($_.DNSServerSearchOrder -join ', ')"
         }
 
-        # Installed Applications from both 32-bit and 64-bit Registry
         $uninstallKeys = @(
             "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
             "HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*",
@@ -711,7 +865,6 @@ function Export-PCReport {
             Select-Object DisplayName, DisplayVersion, Publisher, InstallDate |
             Sort-Object DisplayName -Unique
 
-        # Format report content
         $reportBuilder = [System.Text.StringBuilder]::new()
         [void]$reportBuilder.AppendLine("================================================================================")
         [void]$reportBuilder.AppendLine("                         COMPANY IT INVENTORY REPORT                            ")
@@ -736,9 +889,7 @@ function Export-PCReport {
         [void]$reportBuilder.AppendLine("Last Boot Up Time:   $($os.LastBootUpTime)")
         [void]$reportBuilder.AppendLine("")
         [void]$reportBuilder.AppendLine("--- NETWORK CONFIGURATION ---")
-        foreach ($net in $netDetails) {
-            [void]$reportBuilder.AppendLine($net)
-        }
+        foreach ($net in $netDetails) { [void]$reportBuilder.AppendLine($net) }
         [void]$reportBuilder.AppendLine("")
         [void]$reportBuilder.AppendLine("--- INSTALLED APPLICATIONS ($($installedApps.Count) Found) ---")
         [void]$reportBuilder.AppendLine(("{0,-50} {1,-20} {2}" -f "Name", "Version", "Publisher"))
@@ -752,16 +903,82 @@ function Export-PCReport {
         [void]$reportBuilder.AppendLine("================================================================================")
         [void]$reportBuilder.AppendLine("End of Report")
 
-        # Save UTF-8 encoded file
         $reportBuilder.ToString() | Out-File -FilePath $reportFilePath -Encoding utf8 -Force
         
         Write-Host "[+] Report generated successfully!" -ForegroundColor Green
         Write-Host "    File Location: $reportFilePath" -ForegroundColor Yellow
         Write-ITLog -Action "Export PC Report" -Result "Saved to $reportFilePath" -Level "SUCCESS"
+        return $reportFilePath
     } catch {
-        Write-Host "[-] Failed to generate inventory report: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "[-] Failed to generate report: $($_.Exception.Message)" -ForegroundColor Red
         Write-ITLog -Action "Export PC Report" -Result "Failed: $($_.Exception.Message)" -Level "ERROR"
+        return $null
     }
+}
+
+function Menu-ExportReport {
+    Clear-Host
+    Write-Host "=================================================" -ForegroundColor Cyan
+    Write-Host "         EXPORT PC INVENTORY REPORT              " -ForegroundColor Yellow
+    Write-Host "=================================================" -ForegroundColor Cyan
+    Export-PCReportInternal | Out-Null
+    Write-Host ""
+    Read-Host "Press Enter to return to main menu..."
+}
+
+# ==============================================================================
+# [0] FAST ONBOARD: RUN COMPLETE PROVISIONING BUNDLE (ALL-IN-ONE)
+# ==============================================================================
+function Menu-FastOnboardAll {
+    Clear-Host
+    Write-Host "============================================================" -ForegroundColor Cyan
+    Write-Host "      FAST ONBOARD: RUN COMPLETE PROVISIONING BUNDLE       " -ForegroundColor Yellow
+    Write-Host "============================================================" -ForegroundColor Cyan
+    Write-Host "This will automatically execute the complete setup sequence:" -ForegroundColor White
+    Write-Host "  1. Google Chrome & Mozilla Firefox"
+    Write-Host "  2. MicroSIP VoIP & OpenVPN (+ Carrybee OVPN profile)"
+    Write-Host "  3. AnyDesk & UltraViewer Remote Support"
+    Write-Host "  4. Print Server deployment & Defender exclusions"
+    Write-Host "  5. Windows Performance Tweaks & NTP Time Resync"
+    Write-Host "  6. Automatic PC Inventory Report Export"
+    Write-Host "============================================================" -ForegroundColor Cyan
+    
+    $confirm = Read-Host "Proceed with automated provisioning? (Y/N)"
+    if ($confirm -notmatch '^[Yy]$') { return }
+
+    Write-ITLog -Action "Fast Onboard" -Result "Started All-in-One Deployment" -Level "INFO"
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+
+    Write-Host "`n[STAGE 1/6] Deploying Web Browsers..." -ForegroundColor Magenta
+    Install-GoogleChromeInternal | Out-Null
+    Install-MozillaFirefoxInternal | Out-Null
+
+    Write-Host "`n[STAGE 2/6] Deploying VoIP & VPN..." -ForegroundColor Magenta
+    Install-MicroSIPInternal | Out-Null
+    Install-OpenVPNInternal | Out-Null
+
+    Write-Host "`n[STAGE 3/6] Deploying Remote Support Tools..." -ForegroundColor Magenta
+    Install-AnyDeskInternal | Out-Null
+    Install-UltraViewerInternal | Out-Null
+
+    Write-Host "`n[STAGE 4/6] Deploying Print Server & Security..." -ForegroundColor Magenta
+    Deploy-PrintServerInternal | Out-Null
+
+    Write-Host "`n[STAGE 5/6] Applying Windows Optimization & NTP Clock Sync..." -ForegroundColor Magenta
+    Optimize-WindowsPerformanceInternal
+
+    Write-Host "`n[STAGE 6/6] Generating Final Inventory Audit..." -ForegroundColor Magenta
+    $report = Export-PCReportInternal
+
+    $stopwatch.Stop()
+    $totalMinutes = [math]::Round($stopwatch.Elapsed.TotalMinutes, 2)
+
+    Write-Host ""
+    Write-Host "============================================================" -ForegroundColor Green
+    Write-Host "   COMPLETE PROVISIONING BUNDLE FINISHED IN $totalMinutes MINS!    " -ForegroundColor Yellow
+    Write-Host "============================================================" -ForegroundColor Green
+    if ($report) { Write-Host "Report created on Desktop: $report" -ForegroundColor Cyan }
+    Write-ITLog -Action "Fast Onboard" -Result "Completed in $totalMinutes minutes" -Level "SUCCESS"
 
     Write-Host ""
     Read-Host "Press Enter to return to main menu..."
@@ -776,34 +993,43 @@ function Show-MainMenu {
 
     do {
         Clear-Host
-        Write-Host "=========================================" -ForegroundColor Cyan
-        Write-Host "             COMPANY IT TOOL             " -ForegroundColor White
-        Write-Host "=========================================" -ForegroundColor Cyan
+        Write-Host "=================================================" -ForegroundColor Cyan
+        Write-Host "            COMPANY IT TOOL (v2.0)               " -ForegroundColor Yellow
+        Write-Host "=================================================" -ForegroundColor Cyan
+        Write-Host " [0]  ⚡ RUN COMPLETE PROVISIONING BUNDLE        " -ForegroundColor Green
         Write-Host ""
-        Write-Host "  1. Device Information" -ForegroundColor White
-        Write-Host "  2. Install OpenVPN Client" -ForegroundColor White
-        Write-Host "  3. Install MicroSIP" -ForegroundColor White
-        Write-Host "  4. Install Google Chrome" -ForegroundColor White
-        Write-Host "  5. Install Mozilla Firefox" -ForegroundColor White
-        Write-Host "  6. Install DotMAX Printer Driver" -ForegroundColor White
-        Write-Host "  7. Download Print Server" -ForegroundColor White
-        Write-Host "  8. Export PC Information Report" -ForegroundColor White
-        Write-Host "  9. Exit" -ForegroundColor Yellow
+        Write-Host " --- SOFTWARE DEPLOYMENTS ---                    " -ForegroundColor Gray
+        Write-Host " [1]  Install Web Browsers (Chrome & Firefox)    " -ForegroundColor White
+        Write-Host " [2]  Install VoIP & VPN (MicroSIP & OpenVPN)    " -ForegroundColor White
+        Write-Host " [3]  Install Remote Support (AnyDesk / Ultra)   " -ForegroundColor White
+        Write-Host " [4]  Install DotMAX Printer Driver (Wizard)     " -ForegroundColor White
+        Write-Host " [5]  Deploy Print Server & Security Rules       " -ForegroundColor White
         Write-Host ""
-        Write-Host "=========================================" -ForegroundColor Cyan
+        Write-Host " --- SYSTEM & NETWORK UTILITIES ---              " -ForegroundColor Gray
+        Write-Host " [6]  Device Information & Rename PC             " -ForegroundColor White
+        Write-Host " [7]  Network Diagnostics & Health Suite         " -ForegroundColor White
+        Write-Host " [8]  Windows OS Repair & Cleanup (SFC/DISM/Temp)" -ForegroundColor White
+        Write-Host " [9]  Windows Debloat & Performance Tweaks       " -ForegroundColor White
+        Write-Host " [10] Export PC Inventory Report                 " -ForegroundColor White
+        Write-Host ""
+        Write-Host " [X]  Exit                                       " -ForegroundColor Red
+        Write-Host "=================================================" -ForegroundColor Cyan
         
-        $selection = Read-Host "Select an option [1-9]"
+        $selection = Read-Host "Select an option [0-10 or X]"
 
-        switch ($selection.Trim()) {
-            "1" { Show-DeviceInformation }
-            "2" { Install-OpenVPN }
-            "3" { Install-MicroSIP }
-            "4" { Install-GoogleChrome }
-            "5" { Install-MozillaFirefox }
-            "6" { Install-DotMaxDriver }
-            "7" { Install-PrintServer }
-            "8" { Export-PCReport }
-            "9" {
+        switch ($selection.Trim().ToUpper()) {
+            "0"  { Menu-FastOnboardAll }
+            "1"  { Menu-InstallBrowsers }
+            "2"  { Menu-InstallVoipAndVpn }
+            "3"  { Menu-InstallRemoteSupport }
+            "4"  { Menu-InstallDotMaxDriver }
+            "5"  { Menu-DeployPrintServer }
+            "6"  { Menu-ShowDeviceInformation }
+            "7"  { Menu-NetworkDiagnostics }
+            "8"  { Menu-SystemRepairAndCleanup }
+            "9"  { Menu-WindowsTweaks }
+            "10" { Menu-ExportReport }
+            "X"  {
                 Write-Host "`n[*] Exiting Company IT Tool. Goodbye!" -ForegroundColor Cyan
                 Write-ITLog -Action "Session Terminated" -Result "User exited menu" -Level "INFO"
                 Cleanup-TempFolder
@@ -811,7 +1037,7 @@ function Show-MainMenu {
                 return
             }
             default {
-                Write-Host "`n[-] Invalid selection. Please enter a number between 1 and 9." -ForegroundColor Red
+                Write-Host "`n[-] Invalid selection. Please enter a valid number or X." -ForegroundColor Red
                 Start-Sleep -Seconds 1.5
             }
         }
