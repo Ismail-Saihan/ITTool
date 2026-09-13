@@ -245,12 +245,19 @@ function Install-OpenVPN {
     Write-Host "            INSTALL OPENVPN CLIENT               " -ForegroundColor Yellow
     Write-Host "=================================================" -ForegroundColor Cyan
 
-    $downloadUrl = "$Script:BaseRawUrl/Software/OpenVPN.exe"
-    $installerPath = "$Script:TempDir\OpenVPN.exe"
+    $downloadUrl = "$Script:BaseRawUrl/Software/OpenVPN.msi"
+    $installerPath = "$Script:TempDir\OpenVPN.msi"
 
     Write-ITLog -Action "OpenVPN Installation" -Result "Started" -Level "INFO"
     
-    $downloadSuccess = Download-FileWithProgress -Url $downloadUrl -DestinationPath $installerPath -DisplayName "OpenVPN Installer"
+    $downloadSuccess = Download-FileWithProgress -Url $downloadUrl -DestinationPath $installerPath -DisplayName "OpenVPN Installer (MSI)"
+    if (-not $downloadSuccess) {
+        # Fallback to OpenVPN.exe if .msi is not available
+        $downloadUrl = "$Script:BaseRawUrl/Software/OpenVPN.exe"
+        $installerPath = "$Script:TempDir\OpenVPN.exe"
+        $downloadSuccess = Download-FileWithProgress -Url $downloadUrl -DestinationPath $installerPath -DisplayName "OpenVPN Installer (EXE)"
+    }
+
     if (-not $downloadSuccess) {
         Write-Host "[-] Installation aborted due to download failure." -ForegroundColor Red
         Read-Host "Press Enter to continue..."
@@ -259,12 +266,16 @@ function Install-OpenVPN {
 
     Write-Host "[*] Executing silent installation (Please wait)..." -ForegroundColor Cyan
     try {
-        # OpenVPN community installers standard silent flag is /S
-        $process = Start-Process -FilePath $installerPath -ArgumentList "/S" -Wait -PassThru -NoNewWindow
+        if ($installerPath.EndsWith(".msi", [System.StringComparison]::OrdinalIgnoreCase)) {
+            $process = Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$installerPath`" /qn /norestart REBOOT=ReallySuppress" -Wait -PassThru -NoNewWindow
+        } else {
+            # OpenVPN community / inno / nsis installers standard silent flag is /S
+            $process = Start-Process -FilePath $installerPath -ArgumentList "/S" -Wait -PassThru -NoNewWindow
+        }
         
-        if ($process.ExitCode -eq 0) {
+        if ($process.ExitCode -eq 0 -or $process.ExitCode -eq 3010) {
             Write-Host "[+] OpenVPN successfully installed!" -ForegroundColor Green
-            Write-ITLog -Action "OpenVPN Installation" -Result "Completed Successfully (ExitCode: 0)" -Level "SUCCESS"
+            Write-ITLog -Action "OpenVPN Installation" -Result "Completed Successfully (ExitCode: $($process.ExitCode))" -Level "SUCCESS"
         } else {
             Write-Host "[!] OpenVPN installer finished with exit code: $($process.ExitCode)" -ForegroundColor Yellow
             Write-ITLog -Action "OpenVPN Installation" -Result "Completed with warning (ExitCode: $($process.ExitCode))" -Level "WARNING"
