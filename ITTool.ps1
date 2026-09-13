@@ -311,42 +311,42 @@ function Import-OpenVPNConfigInternal {
 }
 
 function Install-OpenVPNInternal {
-    $downloadUrl = "$Script:BaseRawUrl/Software/OpenVPN.msi"
-    $installerPath = "$Script:TempDir\OpenVPN.msi"
+    # Official OpenVPN Connect Client v3 (Corporate Client)
+    $downloadUrl = "https://openvpn.net/downloads/openvpn-connect-v3-windows.msi"
+    $installerPath = "$Script:TempDir\openvpn-connect-v3-windows.msi"
 
-    Write-ITLog -Action "OpenVPN Installation" -Result "Started" -Level "INFO"
+    Write-ITLog -Action "OpenVPN Connect Installation" -Result "Started" -Level "INFO"
     
-    $downloadSuccess = Download-FileWithProgress -Url $downloadUrl -DestinationPath $installerPath -DisplayName "OpenVPN Installer (MSI)"
+    $downloadSuccess = Download-FileWithProgress -Url $downloadUrl -DestinationPath $installerPath -DisplayName "OpenVPN Connect Client"
     if (-not $downloadSuccess) {
-        $downloadUrl = "$Script:BaseRawUrl/Software/OpenVPN.exe"
-        $installerPath = "$Script:TempDir\OpenVPN.exe"
-        $downloadSuccess = Download-FileWithProgress -Url $downloadUrl -DestinationPath $installerPath -DisplayName "OpenVPN Installer (EXE)"
+        # Fallback to repository mirror if available
+        $downloadUrl = "$Script:BaseRawUrl/Software/OpenVPN.msi"
+        $downloadSuccess = Download-FileWithProgress -Url $downloadUrl -DestinationPath $installerPath -DisplayName "OpenVPN Client (Mirror)"
     }
 
     if (-not $downloadSuccess) { return $false }
 
-    Write-Host "[*] Executing silent installation..." -ForegroundColor Cyan
+    Write-Host "[*] Installing OpenVPN Connect Client silently (MSI)..." -ForegroundColor Cyan
     try {
-        if ($installerPath.EndsWith(".msi", [System.StringComparison]::OrdinalIgnoreCase)) {
-            $process = Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$installerPath`" /qn /norestart REBOOT=ReallySuppress" -Wait -PassThru -NoNewWindow
-        } else {
-            $process = Start-Process -FilePath $installerPath -ArgumentList "/S" -Wait -PassThru -NoNewWindow
-        }
+        # Terminate any running instances before updating/installing
+        Get-Process -Name "OpenVPNConnect", "ovpnconnector" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+
+        $process = Start-Process -FilePath "msiexec.exe" -ArgumentList "/i `"$installerPath`" /qn /norestart REBOOT=ReallySuppress" -Wait -PassThru -NoNewWindow
         
         if ($process.ExitCode -eq 0 -or $process.ExitCode -eq 3010) {
-            Write-Host "[+] OpenVPN successfully installed!" -ForegroundColor Green
-            Write-ITLog -Action "OpenVPN Installation" -Result "Completed Successfully (ExitCode: $($process.ExitCode))" -Level "SUCCESS"
+            Write-Host "[+] OpenVPN Connect Client successfully installed!" -ForegroundColor Green
+            Write-ITLog -Action "OpenVPN Connect Installation" -Result "Completed Successfully (ExitCode: $($process.ExitCode))" -Level "SUCCESS"
         } else {
-            Write-Host "[!] OpenVPN finished with warning code: $($process.ExitCode)" -ForegroundColor Yellow
-            Write-ITLog -Action "OpenVPN Installation" -Result "Warning code: $($process.ExitCode)" -Level "WARNING"
+            Write-Host "[!] OpenVPN Connect finished with code: $($process.ExitCode)" -ForegroundColor Yellow
+            Write-ITLog -Action "OpenVPN Connect Installation" -Result "Exit code: $($process.ExitCode)" -Level "WARNING"
         }
 
-        # Auto-import OVPN profile
+        # Auto-import Carrybee OVPN profile into OpenVPN Connect
         Import-OpenVPNConfigInternal -ProfileName "Carrybee-IPTSP-BOL.ovpn" | Out-Null
         return $true
     } catch {
-        Write-Host "[-] OpenVPN installation failed: $($_.Exception.Message)" -ForegroundColor Red
-        Write-ITLog -Action "OpenVPN Installation" -Result "Failed: $($_.Exception.Message)" -Level "ERROR"
+        Write-Host "[-] OpenVPN Connect installation failed: $($_.Exception.Message)" -ForegroundColor Red
+        Write-ITLog -Action "OpenVPN Connect Installation" -Result "Failed: $($_.Exception.Message)" -Level "ERROR"
         return $false
     } finally {
         if (Test-Path $installerPath) { Remove-Item $installerPath -Force -ErrorAction SilentlyContinue }
@@ -358,7 +358,7 @@ function Menu-InstallVoipAndVpn {
     Write-Host "=================================================" -ForegroundColor Cyan
     Write-Host "         INSTALL VOIP & VPN BUNDLE               " -ForegroundColor Yellow
     Write-Host "=================================================" -ForegroundColor Cyan
-    Write-Host "Installing MicroSIP and OpenVPN with Carrybee profile..." -ForegroundColor Gray
+    Write-Host "Installing MicroSIP and OpenVPN Connect Client with Carrybee profile..." -ForegroundColor Gray
     Write-Host ""
     Install-MicroSIPInternal | Out-Null
     Write-Host ""
@@ -1017,7 +1017,7 @@ function Show-MainMenu {
         Write-Host ""
         Write-Host " --- SOFTWARE DEPLOYMENTS ---                    " -ForegroundColor Gray
         Write-Host " [1]  Install Web Browsers (Chrome & Firefox)    " -ForegroundColor White
-        Write-Host " [2]  Install VoIP & VPN (MicroSIP & OpenVPN)    " -ForegroundColor White
+        Write-Host " [2]  Install VoIP & VPN (MicroSIP & OpenVPN Connect)" -ForegroundColor White
         Write-Host " [3]  Install Remote Support (AnyDesk / Ultra)   " -ForegroundColor White
         Write-Host " [4]  Install DotMAX Printer Driver (Wizard)     " -ForegroundColor White
         Write-Host " [5]  Deploy Print Server & Security Rules       " -ForegroundColor White
