@@ -397,30 +397,91 @@ function Import-OpenVPNConfigInternal {
     $ovpnRemoteUrl = "$Script:BaseRawUrl/Software/$ProfileName"
     $ovpnLocalPath = "$Script:CompanyDir\$ProfileName"
 
-    $downloadSuccess = Download-FileWithProgress -Url $ovpnRemoteUrl -DestinationPath $ovpnLocalPath -DisplayName "VPN Profile ($ProfileName)"
-    if (-not $downloadSuccess) { return $false }
+    # Check if profile already exists locally in repository or script root
+    $localSourcePath = ""
+    if ($PSScriptRoot -and (Test-Path "$PSScriptRoot\Software\$ProfileName")) {
+        $localSourcePath = "$PSScriptRoot\Software\$ProfileName"
+    } elseif (Test-Path "G:\ITTool\Software\$ProfileName") {
+        $localSourcePath = "G:\ITTool\Software\$ProfileName"
+    }
 
-    $imported = $false
+    if ($localSourcePath) {
+        Copy-Item -Path $localSourcePath -Destination $ovpnLocalPath -Force
+        $downloadSuccess = $true
+    } else {
+        $downloadSuccess = Download-FileWithProgress -Url $ovpnRemoteUrl -DestinationPath $ovpnLocalPath -DisplayName "VPN Profile ($ProfileName)"
+    }
 
-    # 1. OpenVPN Connect v3
-    $ovpnConnectPath = "$env:ProgramFiles\OpenVPN Connect\OpenVPNConnect.exe"
-    if (Test-Path $ovpnConnectPath) {
-        Write-Host "[*] OpenVPN Connect detected. Launching profile import..." -ForegroundColor Cyan
+    if (-not $downloadSuccess -or -not (Test-Path $ovpnLocalPath)) {
+        Write-Host "[-] Failed to obtain VPN profile file." -ForegroundColor Red
+        return $false
+    }
+
+    # Copy profile to Desktop for instant technician/user access and double-click import
+    $desktopPath = [Environment]::GetFolderPath("Desktop")
+    if (Test-Path $desktopPath) {
         try {
-            Start-Process -FilePath $ovpnConnectPath -ArgumentList "--import-profile=`"$ovpnLocalPath`""
-            Write-Host "[+] Profile sent to OpenVPN Connect successfully!" -ForegroundColor Green
-            Write-ITLog -Action "Import OVPN Config" -Result "Imported into OpenVPN Connect ($ProfileName)" -Level "SUCCESS"
-            $imported = $true
+            Copy-Item -Path $ovpnLocalPath -Destination "$desktopPath\$ProfileName" -Force
+            Write-Host "[+] Profile copied to Desktop: $desktopPath\$ProfileName" -ForegroundColor Green
         } catch {
-            Write-Host "[!] Error triggering OpenVPN Connect import: $($_.Exception.Message)" -ForegroundColor Yellow
-            Write-ITLog -Action "Import OVPN Config" -Result "Error: $($_.Exception.Message)" -Level "WARNING"
+            # Non-blocking
         }
     }
 
-    # 2. OpenVPN Community Client
+    $imported = $false
+
+    # 1. OpenVPN Connect v3 Client
+    $ovpnConnectPath = "$env:ProgramFiles\OpenVPN Connect\OpenVPNConnect.exe"
+    if (-not (Test-Path $ovpnConnectPath)) {
+        $ovpnConnectPath = "${env:ProgramFiles(x86)}\OpenVPN Connect\OpenVPNConnect.exe"
+    }
+
+    if (Test-Path $ovpnConnectPath) {
+        Write-Host "[*] OpenVPN Connect detected. Importing profile into OpenVPN Connect..." -ForegroundColor Cyan
+        $profileCleanName = [System.IO.Path]::GetFileNameWithoutExtension($ProfileName)
+
+        try {
+            # Dismiss first-launch onboarding/GDPR dialogs so the CLI engine is unblocked
+            cmd /c "`"$ovpnConnectPath`" --accept-gdpr --skip-startup-dialogs" | Out-Null
+
+            # Check if profile is already imported
+            $listOutput = cmd /c "`"$ovpnConnectPath`" --list-profiles" 2>&1 | Out-String
+            if ($listOutput -like "*$profileCleanName*") {
+                Write-Host "[+] Profile '$profileCleanName' is already registered in OpenVPN Connect!" -ForegroundColor Green
+                Write-ITLog -Action "Import OVPN Config" -Result "Profile already active in OpenVPN Connect: $profileCleanName" -Level "SUCCESS"
+                $imported = $true
+            } else {
+                # Import profile with official OpenVPN Connect v3 CLI
+                $importCmd = "`"$ovpnConnectPath`" --import-profile=`"$ovpnLocalPath`" --name=`"$profileCleanName`""
+                $importResult = cmd /c $importCmd 2>&1 | Out-String
+
+                if ($importResult -match '"status":\s*"success"' -or $importResult -match 'already exists') {
+                    Write-Host "[+] Profile '$profileCleanName' successfully imported into OpenVPN Connect!" -ForegroundColor Green
+                    Write-ITLog -Action "Import OVPN Config" -Result "Imported into OpenVPN Connect: $profileCleanName" -Level "SUCCESS"
+                    $imported = $true
+                } else {
+                    Write-Host "[!] CLI import returned: $($importResult.Trim())" -ForegroundColor Yellow
+                    # Fallback: Trigger native Windows file association import handler
+                    Start-Process -FilePath $ovpnConnectPath -ArgumentList "--open-association=`"$ovpnLocalPath`""
+                    $imported = $true
+                }
+            }
+
+            # Launch OpenVPN Connect in the system tray so user can immediately connect
+            Start-Process -FilePath $ovpnConnectPath -ArgumentList "--minimize --accept-gdpr --skip-startup-dialogs" -ErrorAction SilentlyContinue
+        } catch {
+            Write-Host "[!] OpenVPN Connect CLI error: $($_.Exception.Message)" -ForegroundColor Yellow
+            Write-ITLog -Action "Import OVPN Config" -Result "Error: $($_.Exception.Message)" -Level "WARNING"
+            # Fallback to association launch
+            Start-Process -FilePath $ovpnConnectPath -ArgumentList "--open-association=`"$ovpnLocalPath`"" -ErrorAction SilentlyContinue
+            $imported = $true
+        }
+    }
+
+    # 2. OpenVPN Community Client (Legacy/Standard)
     $communityConfigPath = "$env:ProgramFiles\OpenVPN\config"
     if (Test-Path "$env:ProgramFiles\OpenVPN") {
-        Write-Host "[*] OpenVPN Community detected. Copying profile to config folder..." -ForegroundColor Cyan
+        Write-Host "[*] OpenVPN Community client detected. Staging profile in config directory..." -ForegroundColor Cyan
         try {
             if (-not (Test-Path $communityConfigPath)) { New-Item -Path $communityConfigPath -ItemType Directory -Force | Out-Null }
             Copy-Item -Path $ovpnLocalPath -Destination "$communityConfigPath\$ProfileName" -Force
@@ -487,11 +548,12 @@ function Menu-InstallVoipAndVpn {
     Write-Host " [2]  Install MicroSIP Only (With Auto-Admin)    " -ForegroundColor White
     Write-Host " [3]  Set Installed MicroSIP to Run as Admin     " -ForegroundColor White
     Write-Host " [4]  Install OpenVPN Connect Client + Profile   " -ForegroundColor White
+    Write-Host " [5]  Import / Re-import Carrybee VPN Profile    " -ForegroundColor White
     Write-Host ""
     Write-Host " [B]  Back to Main Menu                          " -ForegroundColor Gray
     Write-Host "=================================================" -ForegroundColor Cyan
 
-    $subChoice = Read-Host "Select an option [1-4 or B]"
+    $subChoice = Read-Host "Select an option [1-5 or B]"
     switch ($subChoice.Trim().ToUpper()) {
         "1" {
             Write-Host ""
@@ -510,6 +572,10 @@ function Menu-InstallVoipAndVpn {
         "4" {
             Write-Host ""
             Install-OpenVPNInternal | Out-Null
+        }
+        "5" {
+            Write-Host ""
+            Import-OpenVPNConfigInternal -ProfileName "Carrybee-IPTSP-BOL.ovpn" | Out-Null
         }
         "B" { return }
         default {
