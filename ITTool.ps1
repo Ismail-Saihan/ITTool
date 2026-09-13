@@ -474,12 +474,58 @@ function Menu-InstallDotMaxDriver {
     Write-Host ""
     Write-Host "[!] NOTICE: This installer is INTERACTIVE." -ForegroundColor Yellow
     Write-Host "[*] Launching installer wizard now. Complete the on-screen steps..." -ForegroundColor Cyan
-    Write-Host "    Waiting for installation to finish..." -ForegroundColor Gray
+    Write-Host "    Waiting for installation window to close..." -ForegroundColor Gray
+    Write-Host "    (You can also press ENTER here at any time once you finish)" -ForegroundColor DarkGray
 
     try {
-        $process = Start-Process -FilePath $installerPath -Wait -PassThru
-        Write-Host "[+] DotMAX setup process completed (Exit code: $($process.ExitCode))." -ForegroundColor Green
-        Write-ITLog -Action "DotMAX Driver Installation" -Result "Completed (ExitCode: $($process.ExitCode))" -Level "SUCCESS"
+        # Launch without -Wait so PowerShell retains monitoring control
+        $process = Start-Process -FilePath $installerPath -PassThru
+
+        # Allow the GUI window to initialize
+        Start-Sleep -Seconds 3
+
+        # Active monitoring loop:
+        # Detects when the installer window closes or if the user presses Enter
+        while (-not $process.HasExited) {
+            # Check if user pressed a key in console
+            try {
+                if ([Console]::KeyAvailable) {
+                    $key = [Console]::ReadKey($true)
+                    if ($key.Key -eq [ConsoleKey]::Enter -or $key.Key -eq [ConsoleKey]::Spacebar) {
+                        Write-Host "`n[*] Manual continuation signaled by user." -ForegroundColor Cyan
+                        break
+                    }
+                }
+            } catch {}
+
+            $process.Refresh()
+
+            # If the installer's main GUI window handle is destroyed (closed by user)
+            if ($process.MainWindowHandle -eq [System.IntPtr]::Zero) {
+                Start-Sleep -Seconds 1
+                $process.Refresh()
+                if ($process.MainWindowHandle -eq [System.IntPtr]::Zero) {
+                    Write-Host "`n[+] Installer window closed." -ForegroundColor Green
+                    break
+                }
+            }
+
+            Start-Sleep -Milliseconds 800
+        }
+
+        # Terminate any lingering background zombie processes of the installer
+        if (-not $process.HasExited) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+        }
+
+        # Clean up any secondary worker processes left behind
+        Get-Process | Where-Object { 
+            ($_.Path -and $_.Path -like "*$fileName*") -or 
+            ($_.ProcessName -match "Windows-72|Driver software")
+        } | Stop-Process -Force -ErrorAction SilentlyContinue
+
+        Write-Host "[+] DotMAX Printer Driver setup completed!" -ForegroundColor Green
+        Write-ITLog -Action "DotMAX Driver Installation" -Result "Completed Successfully" -Level "SUCCESS"
     } catch {
         Write-Host "[-] Failed to execute driver installer: $($_.Exception.Message)" -ForegroundColor Red
         Write-ITLog -Action "DotMAX Driver Installation" -Result "Failed: $($_.Exception.Message)" -Level "ERROR"
