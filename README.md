@@ -1,6 +1,6 @@
-# Company IT Deployment & Provisioning Utility (ITTool)
+# Company IT Deployment & Provisioning Utility (ITTool v2.0)
 
-A modular, menu-driven PowerShell automation tool for IT administrators and technicians to rapidly provision, configure, and audit Windows 10 and Windows 11 endpoints.
+A modular, menu-driven PowerShell automation tool for IT administrators and field technicians to rapidly provision, configure, optimize, and audit Windows 10 and Windows 11 endpoints.
 
 ---
 
@@ -14,7 +14,10 @@ ITTool/
 ├── ITTool.ps1
 └── Software/
     ├── README.md
-    ├── OpenVPN.exe
+    ├── AnyDesk.exe
+    ├── UltraViewer.exe
+    ├── OpenVPN.msi
+    ├── Carrybee-IPTSP-BOL.ovpn
     ├── MicroSIP.exe
     ├── Driver software for Windows-72.exe
     └── PrintServer.exe
@@ -27,29 +30,50 @@ ITTool/
 Technicians can launch the utility directly from a PowerShell console:
 
 ```powershell
-irm https://short-url.com/ITTool | iex
+irm https://tinyurl.com/2ynbvdxs | iex
 ```
 
-### What happens automatically:
-1. **Privilege Elevation Check:** If the technician runs the command from a standard (non-elevated) prompt, the script automatically triggers a UAC prompt and relaunches itself inside an Administrator PowerShell session.
-2. **Environment Initialization:** Forces modern TLS protocols (`TLS 1.2` / `TLS 1.3`), ensures `C:\CompanyTools` and `C:\CompanyTools\Logs` exist, and sets up a clean temp directory.
-3. **Menu Loop:** Launches the interactive administration console.
+*(Or direct Raw GitHub URL:)*
+```powershell
+irm https://raw.githubusercontent.com/Ismail-Saihan/ITTool/main/ITTool.ps1 | iex
+```
 
 ---
 
-## 🛠️ Menu Options & Capabilities
+## 🛠️ Menu Options & Capabilities (v2.0)
 
-| # | Option | Description | Mode |
-|---|--------|-------------|------|
-| **1** | **Device Information** | Inspects hardware, BIOS serial, CPU, RAM, OS build, IP, MAC. Prompts to rename PC with reboot notice. | Interactive |
-| **2** | **Install OpenVPN Client** | Downloads `OpenVPN.exe` from GitHub repo, installs silently (`/S`), and cleans up temp files. | Silent |
-| **3** | **Install MicroSIP** | Downloads `MicroSIP.exe` from GitHub repo, installs silently (`/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`). | Silent |
-| **4** | **Install Google Chrome** | Downloads official Google Chrome Enterprise 64-bit installer and runs silent install (`/silent /install`). | Silent |
-| **5** | **Install Mozilla Firefox** | Downloads official Mozilla Firefox 64-bit installer and runs silent install (`-ms`). | Silent |
-| **6** | **Install DotMAX Printer Driver** | Downloads `Driver software for Windows-72.exe` (with URL encoding), launches wizard for technician to configure. | Interactive |
-| **7** | **Download Print Server** | Deploys `PrintServer.exe` to `C:\CompanyTools\`, creates Desktop shortcut, adds Windows Defender exclusions, and checks Win 11 Smart App Control. | Automated |
-| **8** | **Export PC Report** | Exports complete hardware, network, and installed applications inventory to `Desktop\<PC-Name>-Report.txt`. | Automated |
-| **9** | **Exit** | Cleans temp directories, logs termination, and closes session cleanly. | Clean exit |
+```text
+=================================================
+            COMPANY IT TOOL (v2.0)               
+=================================================
+ [0]  ⚡ RUN COMPLETE PROVISIONING BUNDLE        
+
+ --- SOFTWARE DEPLOYMENTS ---                    
+ [1]  Install Web Browsers (Chrome & Firefox)    
+ [2]  Install VoIP & VPN (MicroSIP & OpenVPN)    
+ [3]  Install Remote Support (AnyDesk / Ultra)   
+ [4]  Install DotMAX Printer Driver (Wizard)     
+ [5]  Deploy Print Server & Security Rules       
+
+ --- SYSTEM & NETWORK UTILITIES ---              
+ [6]  Device Information & Rename PC             
+ [7]  Network Diagnostics & Health Suite         
+ [8]  Windows OS Repair & Cleanup (SFC/DISM/Temp)
+ [9]  Windows Debloat & Performance Tweaks       
+ [10] Export PC Inventory Report                 
+
+ [X]  Exit                                       
+=================================================
+```
+
+### Feature Highlights:
+- **`[0] ⚡ RUN COMPLETE PROVISIONING BUNDLE`:** Single-click sequential execution of all software installers, Defender exclusions, performance tweaks, and automated report generation in under 4 minutes.
+- **`[2] VoIP & VPN Auto-Import`:** Installs MicroSIP and OpenVPN, and automatically imports `Carrybee-IPTSP-BOL.ovpn` into OpenVPN Connect v3 or OpenVPN Community.
+- **`[3] Helpdesk Remote Access`:** Installs AnyDesk and UltraViewer silently for immediate central IT support.
+- **`[7] Network Diagnostics Suite`:** Gateway ping, DNS tests, public IP check, and one-click DNS flush / Winsock stack repair.
+- **`[8] Windows OS Repair & Maintenance`:** SFC scannow, DISM component restore, temp cache cleanup, and SSD S.M.A.R.T. health checks.
+- **`[9] Debloat & Performance Tuning`:** High-performance power plan, NTP clock resynchronization, and consumer app debloating.
+- **`[10] PC Inventory Audit`:** Exports full hardware specs, network config, and installed software to `Desktop\<PC-Name>-Report.txt`.
 
 ---
 
@@ -58,10 +82,4 @@ irm https://short-url.com/ITTool | iex
 Every operation is recorded in real time to:
 ```text
 C:\CompanyTools\Logs\ITTool.log
-```
-
-Log entry format:
-```text
-[2026-09-13 12:30:15] [USER: CORP\ismail] [DEVICE: WORKSTATION-01] [TYPE: INFO] Action: Chrome Installation | Result: Started
-[2026-09-13 12:35:42] [USER: CORP\ismail] [DEVICE: WORKSTATION-01] [TYPE: SUCCESS] Action: Chrome Installation | Result: Completed Successfully (ExitCode: 0)
 ```
