@@ -1,3 +1,4 @@
 # Binary files configuration (ensure binaries are treated as binary)
 Software/*.exe binary
 Software/*.msi binary
+Software/*.zip binary

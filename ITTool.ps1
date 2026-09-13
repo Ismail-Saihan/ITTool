@@ -538,7 +538,90 @@ function Menu-InstallDotMaxDriver {
 }
 
 # ==============================================================================
-# [5] DEPLOY PRINT SERVER & SECURITY RULES
+# [5] INSTALL CANON LBP6030 / 6018 DRIVER (AUTOMATED PNP)
+# ==============================================================================
+function Install-CanonLBP6030Internal {
+    <#
+    .SYNOPSIS
+        Automates Canon LBP6030/6040/6018L XPS driver injection into Windows Driver Store
+        via pnputil and registers it with the Windows Print Spooler.
+    #>
+    $zipFileName   = "Canon_LBP6030_Driver.zip"
+    $downloadUrl   = "$Script:BaseRawUrl/Software/$zipFileName"
+    $zipPath       = "$Script:TempDir\$zipFileName"
+    $extractDir    = "$Script:TempDir\CanonDriver"
+    $infPath       = "$extractDir\cnnx0_cb3_len-GB.inf"
+    $driverName    = "Canon LBP6030/6040/6018L XPS"
+
+    Write-ITLog -Action "Canon LBP6030 Driver Installation" -Result "Started" -Level "INFO"
+
+    $downloadSuccess = Download-FileWithProgress -Url $downloadUrl -DestinationPath $zipPath -DisplayName "Canon LBP6030 Driver"
+    if (-not $downloadSuccess) { return $false }
+
+    Write-Host "[*] Extracting Canon driver payload..." -ForegroundColor Cyan
+    try {
+        if (-not (Test-Path $extractDir)) { New-Item -Path $extractDir -ItemType Directory -Force | Out-Null }
+        Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
+
+        if (-not (Test-Path $infPath)) {
+            throw "Driver INF file not found at $infPath"
+        }
+
+        # 1. Inject driver package into Windows Driver Store
+        Write-Host "[*] Injecting driver into Windows Driver Store (pnputil)..." -ForegroundColor Cyan
+        $pnpOutput = & pnputil.exe /add-driver $infPath /install
+        Write-Host "    PnP Driver Store injection completed." -ForegroundColor Gray
+
+        # 2. Register printer driver with Print Spooler
+        Write-Host "[*] Registering driver with Windows Print Spooler..." -ForegroundColor Cyan
+        try {
+            Add-PrinterDriver -Name $driverName -ErrorAction SilentlyContinue
+            Write-Host "[+] Driver '$driverName' registered successfully!" -ForegroundColor Green
+        } catch {
+            Write-Host "[!] Note on Add-PrinterDriver: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+
+        # 3. Pre-create printer queue if desired
+        Write-Host "[*] Checking printer queue status..." -ForegroundColor Cyan
+        $existingPrinter = Get-Printer -Name "Canon LBP6030" -ErrorAction SilentlyContinue
+        if (-not $existingPrinter) {
+            try {
+                Add-Printer -Name "Canon LBP6030" -DriverName $driverName -PortName "USB001" -ErrorAction SilentlyContinue
+                Write-Host "[+] Printer 'Canon LBP6030' queue bound to port USB001!" -ForegroundColor Green
+            } catch {
+                Write-Host "[+] Driver is staged and ready! Connecting the printer via USB will automatically initialize it." -ForegroundColor Green
+            }
+        } else {
+            Write-Host "[+] Printer 'Canon LBP6030' is already present." -ForegroundColor Green
+        }
+
+        Write-ITLog -Action "Canon LBP6030 Driver Installation" -Result "Completed Successfully" -Level "SUCCESS"
+        return $true
+
+    } catch {
+        Write-Host "[-] Canon LBP6030 driver installation failed: $($_.Exception.Message)" -ForegroundColor Red
+        Write-ITLog -Action "Canon LBP6030 Driver Installation" -Result "Failed: $($_.Exception.Message)" -Level "ERROR"
+        return $false
+    } finally {
+        if (Test-Path $zipPath) { Remove-Item $zipPath -Force -ErrorAction SilentlyContinue }
+        if (Test-Path $extractDir) { Remove-Item $extractDir -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+function Menu-InstallCanonLBP6030 {
+    Clear-Host
+    Write-Host "=================================================" -ForegroundColor Cyan
+    Write-Host "     INSTALL CANON LBP6030 / 6018 DRIVER         " -ForegroundColor Yellow
+    Write-Host "=================================================" -ForegroundColor Cyan
+    Write-Host "Automated Plug-and-Play Driver Injection via pnputil..." -ForegroundColor Gray
+    Write-Host ""
+    Install-CanonLBP6030Internal | Out-Null
+    Write-Host ""
+    Read-Host "Press Enter to return to main menu..."
+}
+
+# ==============================================================================
+# [6] DEPLOY PRINT SERVER & SECURITY RULES
 # ==============================================================================
 function Deploy-PrintServerInternal {
     $fileName = "PrintServer.exe"
@@ -1011,7 +1094,8 @@ function Menu-FastOnboardAll {
     Install-AnyDeskInternal | Out-Null
     Install-UltraViewerInternal | Out-Null
 
-    Write-Host "`n[STAGE 4/6] Deploying Print Server & Security..." -ForegroundColor Magenta
+    Write-Host "`n[STAGE 4/6] Deploying Canon Driver, Print Server & Security..." -ForegroundColor Magenta
+    Install-CanonLBP6030Internal | Out-Null
     Deploy-PrintServerInternal | Out-Null
 
     Write-Host "`n[STAGE 5/6] Applying Windows Optimization & NTP Clock Sync..." -ForegroundColor Magenta
@@ -1066,19 +1150,20 @@ function Show-MainMenu {
         Write-Host " [2]  Install VoIP & VPN (MicroSIP & OpenVPN Connect)" -ForegroundColor White
         Write-Host " [3]  Install Remote Support (AnyDesk / Ultra)   " -ForegroundColor White
         Write-Host " [4]  Install DotMAX Printer Driver (Wizard)     " -ForegroundColor White
-        Write-Host " [5]  Deploy Print Server & Security Rules       " -ForegroundColor White
+        Write-Host " [5]  Install Canon LBP6030 Driver (Automated PnP)" -ForegroundColor White
+        Write-Host " [6]  Deploy Print Server & Security Rules       " -ForegroundColor White
         Write-Host ""
         Write-Host " --- SYSTEM & NETWORK UTILITIES ---              " -ForegroundColor Gray
-        Write-Host " [6]  Device Information & Rename PC             " -ForegroundColor White
-        Write-Host " [7]  Network Diagnostics & Health Suite         " -ForegroundColor White
-        Write-Host " [8]  Windows OS Repair & Cleanup (SFC/DISM/Temp)" -ForegroundColor White
-        Write-Host " [9]  Windows Debloat & Performance Tweaks       " -ForegroundColor White
-        Write-Host " [10] Export PC Inventory Report                 " -ForegroundColor White
+        Write-Host " [7]  Device Information & Rename PC             " -ForegroundColor White
+        Write-Host " [8]  Network Diagnostics & Health Suite         " -ForegroundColor White
+        Write-Host " [9]  Windows OS Repair & Cleanup (SFC/DISM/Temp)" -ForegroundColor White
+        Write-Host " [10] Windows Debloat & Performance Tweaks       " -ForegroundColor White
+        Write-Host " [11] Export PC Inventory Report                 " -ForegroundColor White
         Write-Host ""
         Write-Host " [X]  Exit                                       " -ForegroundColor Red
         Write-Host "=================================================" -ForegroundColor Cyan
         
-        $selection = Read-Host "Select an option [0-10 or X]"
+        $selection = Read-Host "Select an option [0-11 or X]"
 
         switch ($selection.Trim().ToUpper()) {
             "0"  { Menu-FastOnboardAll }
@@ -1086,12 +1171,13 @@ function Show-MainMenu {
             "2"  { Menu-InstallVoipAndVpn }
             "3"  { Menu-InstallRemoteSupport }
             "4"  { Menu-InstallDotMaxDriver }
-            "5"  { Menu-DeployPrintServer }
-            "6"  { Menu-ShowDeviceInformation }
-            "7"  { Menu-NetworkDiagnostics }
-            "8"  { Menu-SystemRepairAndCleanup }
-            "9"  { Menu-WindowsTweaks }
-            "10" { Menu-ExportReport }
+            "5"  { Menu-InstallCanonLBP6030 }
+            "6"  { Menu-DeployPrintServer }
+            "7"  { Menu-ShowDeviceInformation }
+            "8"  { Menu-NetworkDiagnostics }
+            "9"  { Menu-SystemRepairAndCleanup }
+            "10" { Menu-WindowsTweaks }
+            "11" { Menu-ExportReport }
             "X"  {
                 Write-Host "`n[*] Exiting Carrybee IT Tool. Goodbye!" -ForegroundColor Cyan
                 Write-ITLog -Action "Session Terminated" -Result "User exited menu" -Level "INFO"
