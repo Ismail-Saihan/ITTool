@@ -1,0 +1,9 @@
+# Ignore OS and environment metadata
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Ignore temporary and test outputs
+*.tmp
+*.log
+*-Report.txt
