@@ -984,6 +984,18 @@ function Menu-FastOnboardAll {
     Read-Host "Press Enter to return to main menu..."
 }
 
+function Show-CompanyBanner {
+    $banner = @'
+  MMM      MMM       KKK                          TTTTTTTTTTT      KKK     
+  MMMM    MMMM       KKK                          TTTTTTTTTTT      KKK     
+  MMM MMMM MMM  III  KKK  KKK  RRRRRR     OOOOOO      TTT     III  KKK  KKK
+  MMM  MM  MMM  III  KKKKK     RRR  RRR  OOO  OOO     TTT     III  KKKKK   
+  MMM      MMM  III  KKK KKK   RRRRRR    OOO  OOO     TTT     III  KKK KKK 
+  MMM      MMM  III  KKK  KKK  RRR  RRR   OOOOOO      TTT     III  KKK  KKK
+'@
+    Write-Host $banner -ForegroundColor Cyan
+}
+
 # ==============================================================================
 # MAIN CONSOLE MENU LOOP
 # ==============================================================================
@@ -993,8 +1005,9 @@ function Show-MainMenu {
 
     do {
         Clear-Host
+        Show-CompanyBanner
         Write-Host "=================================================" -ForegroundColor Cyan
-        Write-Host "            COMPANY IT TOOL (v2.0)               " -ForegroundColor Yellow
+        Write-Host "          ENTERPRISE IT TOOL (v2.0)              " -ForegroundColor Yellow
         Write-Host "=================================================" -ForegroundColor Cyan
         Write-Host " [0]  ⚡ RUN COMPLETE PROVISIONING BUNDLE        " -ForegroundColor Green
         Write-Host ""
