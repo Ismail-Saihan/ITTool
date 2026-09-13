@@ -68,7 +68,7 @@ irm https://raw.githubusercontent.com/Ismail-Saihan/ITTool/main/ITTool.ps1 | iex
 
 ### Feature Highlights:
 - **`[0] ⚡ RUN COMPLETE PROVISIONING BUNDLE`:** Single-click sequential execution of all software installers, Defender exclusions, performance tweaks, and automated report generation in under 4 minutes.
-- **`[2] VoIP & VPN Auto-Import`:** Installs MicroSIP and OpenVPN, and automatically imports `Carrybee-IPTSP-BOL.ovpn` into OpenVPN Connect v3 or OpenVPN Community.
+- **`[2] VoIP & VPN Auto-Import`:** Installs MicroSIP configured to run in Administrator mode by default (via Windows AppCompatFlags & shortcut elevation), deploys OpenVPN Connect v3 Client, and automatically imports `Carrybee-IPTSP-BOL.ovpn`.
 - **`[3] Helpdesk Remote Access`:** Installs AnyDesk and UltraViewer silently for immediate central IT support.
 - **`[7] Network Diagnostics Suite`:** Gateway ping, DNS tests, public IP check, and one-click DNS flush / Winsock stack repair.
 - **`[8] Windows OS Repair & Maintenance`:** SFC scannow, DISM component restore, temp cache cleanup, and SSD S.M.A.R.T. health checks.

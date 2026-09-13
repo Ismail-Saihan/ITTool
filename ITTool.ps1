@@ -243,11 +243,14 @@ function Install-MicroSIPInternal {
         # Close any active MicroSIP instance to prevent installer prompts
         Get-Process -Name "microsip" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
-        # MicroSIP is packaged with NSIS. The silent switch is strictly /S (case-sensitive)
         $process = Start-Process -FilePath $installerPath -ArgumentList "/S" -Wait -PassThru -NoNewWindow
         if ($process.ExitCode -eq 0) {
             Write-Host "[+] MicroSIP successfully installed!" -ForegroundColor Green
             Write-ITLog -Action "MicroSIP Installation" -Result "Completed Successfully" -Level "SUCCESS"
+
+            # Configure MicroSIP to run in Administrator mode by default
+            Set-MicroSIPAdminModeInternal | Out-Null
+
             return $true
         } else {
             Write-Host "[!] MicroSIP finished with code: $($process.ExitCode)" -ForegroundColor Yellow
@@ -260,6 +263,128 @@ function Install-MicroSIPInternal {
         return $false
     } finally {
         if (Test-Path $installerPath) { Remove-Item $installerPath -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+function Set-MicroSIPAdminModeInternal {
+    <#
+    .SYNOPSIS
+        Configures MicroSIP to run in Administrator mode by default.
+        Applies machine-wide and user-specific AppCompatFlags and updates shortcut flags.
+    #>
+    Write-Host "[*] Configuring MicroSIP to run in Administrator mode by default..." -ForegroundColor Cyan
+
+    $microsipPaths = @()
+
+    # Standard installation candidate paths
+    $candidatePaths = @(
+        "$env:ProgramFiles\MicroSIP\microsip.exe",
+        "${env:ProgramFiles(x86)}\MicroSIP\microsip.exe",
+        "$env:LOCALAPPDATA\MicroSIP\microsip.exe"
+    )
+    foreach ($path in $candidatePaths) {
+        if (-not [string]::IsNullOrWhiteSpace($path) -and (Test-Path -Path $path)) {
+            if ($microsipPaths -notcontains $path) {
+                $microsipPaths += $path
+            }
+        }
+    }
+
+    # Query registry uninstall keys for any custom MicroSIP installation location
+    $regRoots = @(
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*"
+    )
+    try {
+        $regApps = Get-ItemProperty -Path $regRoots -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like "*MicroSIP*" }
+        foreach ($regApp in $regApps) {
+            if ($regApp.InstallLocation) {
+                $exeInLoc = Join-Path $regApp.InstallLocation "microsip.exe"
+                if ((Test-Path -Path $exeInLoc) -and ($microsipPaths -notcontains $exeInLoc)) {
+                    $microsipPaths += $exeInLoc
+                }
+            }
+            if ($regApp.DisplayIcon) {
+                $cleanIcon = $regApp.DisplayIcon.Trim('"', ' ')
+                if ($cleanIcon -match "\.exe$" -and (Test-Path -Path $cleanIcon) -and ($microsipPaths -notcontains $cleanIcon)) {
+                    $microsipPaths += $cleanIcon
+                }
+            }
+        }
+    } catch {
+        # Non-blocking registry lookup
+    }
+
+    # If no installed executable was detected yet, apply preemptively to standard Program Files paths
+    if ($microsipPaths.Count -eq 0) {
+        $p86 = "${env:ProgramFiles(x86)}\MicroSIP\microsip.exe"
+        $p64 = "$env:ProgramFiles\MicroSIP\microsip.exe"
+        if (-not [string]::IsNullOrWhiteSpace($p86)) { $microsipPaths += $p86 }
+        if (-not [string]::IsNullOrWhiteSpace($p64)) { $microsipPaths += $p64 }
+    }
+
+    $appliedAny = $false
+    $compatKeys = @(
+        "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers",
+        "HKCU:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers"
+    )
+
+    foreach ($exePath in $microsipPaths) {
+        foreach ($key in $compatKeys) {
+            try {
+                if (-not (Test-Path -Path $key)) {
+                    New-Item -Path $key -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
+                }
+                Set-ItemProperty -Path $key -Name $exePath -Value "~ RUNASADMIN" -Force -ErrorAction SilentlyContinue
+                $appliedAny = $true
+            } catch {
+                # Non-blocking
+            }
+        }
+    }
+
+    # Update Desktop and Start Menu shortcuts (.lnk files) to elevate on click
+    $shortcutDirs = @(
+        [Environment]::GetFolderPath("CommonDesktopDirectory"),
+        [Environment]::GetFolderPath("Desktop"),
+        [Environment]::GetFolderPath("CommonPrograms"),
+        [Environment]::GetFolderPath("Programs")
+    )
+
+    $updatedShortcuts = 0
+    foreach ($dir in $shortcutDirs) {
+        if (-not (Test-Path -Path $dir)) { continue }
+        $shortcuts = Get-ChildItem -Path $dir -Filter "*microsip*.lnk" -Recurse -ErrorAction SilentlyContinue
+        foreach ($sc in $shortcuts) {
+            try {
+                $bytes = [System.IO.File]::ReadAllBytes($sc.FullName)
+                if ($bytes.Length -gt 21) {
+                    # Byte 21 (0x15), bit 5 (0x20) is the SLDF_RUNAS_USER flag
+                    if (($bytes[21] -band 0x20) -eq 0) {
+                        $bytes[21] = $bytes[21] -bor 0x20
+                        [System.IO.File]::WriteAllBytes($sc.FullName, $bytes)
+                        $updatedShortcuts++
+                    }
+                }
+            } catch {
+                # Non-blocking shortcut edit
+            }
+        }
+    }
+
+    if ($appliedAny) {
+        Write-Host "[+] MicroSIP configured to run in Administrator mode by default." -ForegroundColor Green
+        if ($updatedShortcuts -gt 0) {
+            Write-Host "    Updated $updatedShortcuts MicroSIP shortcut(s) with Run-as-Admin shield." -ForegroundColor Green
+        }
+        Write-ITLog -Action "MicroSIP Admin Mode" -Result "Applied RUNASADMIN to $($microsipPaths.Count) paths ($updatedShortcuts shortcuts updated)" -Level "SUCCESS"
+        return $true
+    } else {
+        Write-Host "[!] Could not set Administrator compatibility layer for MicroSIP." -ForegroundColor Yellow
+        Write-ITLog -Action "MicroSIP Admin Mode" -Result "Failed to set RUNASADMIN" -Level "WARNING"
+        return $false
     }
 }
 
@@ -356,13 +481,43 @@ function Install-OpenVPNInternal {
 function Menu-InstallVoipAndVpn {
     Clear-Host
     Write-Host "=================================================" -ForegroundColor Cyan
-    Write-Host "         INSTALL VOIP & VPN BUNDLE               " -ForegroundColor Yellow
+    Write-Host "       VOIP & VPN (MICROSIP & OPENVPN CONNECT)   " -ForegroundColor Yellow
     Write-Host "=================================================" -ForegroundColor Cyan
-    Write-Host "Installing MicroSIP and OpenVPN Connect Client with Carrybee profile..." -ForegroundColor Gray
+    Write-Host " [1]  Install Full VoIP & VPN Bundle (Default)   " -ForegroundColor Green
+    Write-Host " [2]  Install MicroSIP Only (With Auto-Admin)    " -ForegroundColor White
+    Write-Host " [3]  Set Installed MicroSIP to Run as Admin     " -ForegroundColor White
+    Write-Host " [4]  Install OpenVPN Connect Client + Profile   " -ForegroundColor White
     Write-Host ""
-    Install-MicroSIPInternal | Out-Null
-    Write-Host ""
-    Install-OpenVPNInternal | Out-Null
+    Write-Host " [B]  Back to Main Menu                          " -ForegroundColor Gray
+    Write-Host "=================================================" -ForegroundColor Cyan
+
+    $subChoice = Read-Host "Select an option [1-4 or B]"
+    switch ($subChoice.Trim().ToUpper()) {
+        "1" {
+            Write-Host ""
+            Install-MicroSIPInternal | Out-Null
+            Write-Host ""
+            Install-OpenVPNInternal | Out-Null
+        }
+        "2" {
+            Write-Host ""
+            Install-MicroSIPInternal | Out-Null
+        }
+        "3" {
+            Write-Host ""
+            Set-MicroSIPAdminModeInternal | Out-Null
+        }
+        "4" {
+            Write-Host ""
+            Install-OpenVPNInternal | Out-Null
+        }
+        "B" { return }
+        default {
+            Write-Host "`n[-] Invalid option. Returning to menu..." -ForegroundColor Yellow
+            Start-Sleep -Seconds 1
+            return
+        }
+    }
     Write-Host ""
     Read-Host "Press Enter to return to main menu..."
 }
