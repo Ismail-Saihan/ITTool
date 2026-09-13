@@ -986,12 +986,12 @@ function Menu-FastOnboardAll {
 
 function Show-CompanyBanner {
     $banner = @'
-  MMM      MMM       KKK                          TTTTTTTTTTT      KKK     
-  MMMM    MMMM       KKK                          TTTTTTTTTTT      KKK     
-  MMM MMMM MMM  III  KKK  KKK  RRRRRR     OOOOOO      TTT     III  KKK  KKK
-  MMM  MM  MMM  III  KKKKK     RRR  RRR  OOO  OOO     TTT     III  KKKKK   
-  MMM      MMM  III  KKK KKK   RRRRRR    OOO  OOO     TTT     III  KKK KKK 
-  MMM      MMM  III  KKK  KKK  RRR  RRR   OOOOOO      TTT     III  KKK  KKK
+   ____      _      ____   ____   __   __  ____   _____  _____ 
+  / ___|    / \    |  _ \ |  _ \  \ \ / / | __ ) | ____|| ____|
+ | |       / _ \   | |_) || |_) |  \ V /  |  _ \ |  _|  |  _|  
+ | |___   / ___ \  |  _ < |  _ <    | |   | |_) || |___ | |___ 
+  \____| /_/   \_\ |_| \_\|_| \_\   |_|   |____/ |_____||_____|
+                  CARRYBEE IT DEPLOYMENT SUITE
 '@
     Write-Host $banner -ForegroundColor Cyan
 }
@@ -1007,7 +1007,7 @@ function Show-MainMenu {
         Clear-Host
         Show-CompanyBanner
         Write-Host "=================================================" -ForegroundColor Cyan
-        Write-Host "          ENTERPRISE IT TOOL (v2.0)              " -ForegroundColor Yellow
+        Write-Host "          CARRYBEE IT UTILITY TOOL (v2.0)        " -ForegroundColor Yellow
         Write-Host "=================================================" -ForegroundColor Cyan
         Write-Host " [0]  ⚡ RUN COMPLETE PROVISIONING BUNDLE        " -ForegroundColor Green
         Write-Host ""
@@ -1043,7 +1043,7 @@ function Show-MainMenu {
             "9"  { Menu-WindowsTweaks }
             "10" { Menu-ExportReport }
             "X"  {
-                Write-Host "`n[*] Exiting Company IT Tool. Goodbye!" -ForegroundColor Cyan
+                Write-Host "`n[*] Exiting Carrybee IT Tool. Goodbye!" -ForegroundColor Cyan
                 Write-ITLog -Action "Session Terminated" -Result "User exited menu" -Level "INFO"
                 Cleanup-TempFolder
                 Start-Sleep -Seconds 1
