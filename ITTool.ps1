@@ -16,6 +16,7 @@ $Script:SelfRemoteUrl  = "$Script:BaseRawUrl/ITTool.ps1"
 
 # Directory & Log Paths
 $Script:CompanyDir     = "C:\CompanyTools"
+$Script:DownloadDir    = "$Script:CompanyDir\Downloads"
 $Script:LogDir         = "$Script:CompanyDir\Logs"
 $Script:LogFile        = "$Script:LogDir\ITTool.log"
 $Script:TempDir        = "$env:TEMP\ITTool_$(Get-Random)"
@@ -69,6 +70,9 @@ function Initialize-Environment {
         if (-not (Test-Path -Path $Script:CompanyDir)) {
             New-Item -Path $Script:CompanyDir -ItemType Directory -Force | Out-Null
         }
+        if (-not (Test-Path -Path $Script:DownloadDir)) {
+            New-Item -Path $Script:DownloadDir -ItemType Directory -Force | Out-Null
+        }
         if (-not (Test-Path -Path $Script:LogDir)) {
             New-Item -Path $Script:LogDir -ItemType Directory -Force | Out-Null
         }
@@ -105,29 +109,122 @@ function Write-ITLog {
 }
 
 # ==============================================================================
-# HELPER UTILITIES
+# HELPER UTILITIES & SMART CACHING
 # ==============================================================================
+function Test-FileAlreadyDownloaded {
+    <#
+    .SYNOPSIS
+        Checks if a target file is already downloaded in the desired folder
+        and verifies that it is valid and meets size requirements.
+    .PARAMETER FilePath
+        Target file path to check.
+    .PARAMETER MinBytes
+        Minimum required file size in bytes (default: 1024 bytes).
+    .OUTPUTS
+        Boolean ($true if valid cached file exists, $false otherwise).
+    #>
+    param (
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [Parameter(Mandatory = $false)][long]$MinBytes = 1024
+    )
+
+    if ([string]::IsNullOrWhiteSpace($FilePath)) { return $false }
+
+    if (Test-Path -Path $FilePath) {
+        try {
+            $item = Get-Item -Path $FilePath -ErrorAction Stop
+            if ($item.Length -ge $MinBytes) {
+                $sizeMB = [math]::Round(($item.Length / 1MB), 2)
+                Write-Host "[+] Verified existing file: $($item.Name) ($sizeMB MB)" -ForegroundColor Green
+                Write-Host "    Using cached file at: $FilePath" -ForegroundColor Gray
+                return $true
+            } else {
+                Write-Warning "File exists at $FilePath but is incomplete or 0 bytes ($($item.Length) bytes). Re-downloading..."
+                Remove-Item -Path $FilePath -Force -ErrorAction SilentlyContinue
+                return $false
+            }
+        } catch {
+            return $false
+        }
+    }
+    return $false
+}
+
 function Download-FileWithProgress {
     <#
     .SYNOPSIS
-        Downloads a remote file with visual status and validation.
+        Downloads a remote file with visual progress tracking, smart caching,
+        and local storage fallback (USB/Offline folders).
     #>
     param (
         [Parameter(Mandatory = $true)][string]$Url,
         [Parameter(Mandatory = $true)][string]$DestinationPath,
-        [Parameter(Mandatory = $false)][string]$DisplayName = "File"
+        [Parameter(Mandatory = $false)][string]$DisplayName = "File",
+        [Parameter(Mandatory = $false)][long]$MinBytes = 1024,
+        [Parameter(Mandatory = $false)][switch]$Force
     )
 
+    # 1. Smart Cache Check: Avoid downloading if file already exists in desired folder
+    if (-not $Force -and (Test-FileAlreadyDownloaded -FilePath $DestinationPath -MinBytes $MinBytes)) {
+        Write-Host "[*] Skipping download for $DisplayName (already present in desired folder)." -ForegroundColor Cyan
+        Write-ITLog -Action "Cache Check: $DisplayName" -Result "Reused cached file: $DestinationPath" -Level "INFO"
+        return $true
+    }
+
+    # 2. Local Disk / USB / Offline Bundle Search: Avoid internet download if available locally
+    $targetName = [System.IO.Path]::GetFileName($DestinationPath)
+    $localSearchPaths = @(
+        "$PSScriptRoot\Software\$targetName",
+        "G:\ITTool\Software\$targetName",
+        "G:\Branch Software\Printer Driver\$targetName",
+        "G:\Branch Software\Installers\$targetName",
+        "$Script:DownloadDir\$targetName"
+    )
+
+    foreach ($candidate in $localSearchPaths) {
+        if (-not [string]::IsNullOrWhiteSpace($candidate) -and (Test-Path -Path $candidate)) {
+            try {
+                $candItem = Get-Item -Path $candidate -ErrorAction Stop
+                if ($candItem.Length -ge $MinBytes -and $candItem.FullName -ne $DestinationPath) {
+                    Write-Host "[+] Found local installer on disk/USB: $($candItem.FullName)" -ForegroundColor Green
+                    Write-Host "    Copying locally to destination folder..." -ForegroundColor Gray
+
+                    $destFolder = Split-Path -Path $DestinationPath -Parent
+                    if ($destFolder -and -not (Test-Path -Path $destFolder)) {
+                        New-Item -Path $destFolder -ItemType Directory -Force | Out-Null
+                    }
+
+                    Copy-Item -Path $candItem.FullName -Destination $DestinationPath -Force
+                    if (Test-Path -Path $DestinationPath) {
+                        $sizeMB = [math]::Round(((Get-Item -Path $DestinationPath).Length / 1MB), 2)
+                        Write-Host "[+] Local copy completed successfully ($sizeMB MB)" -ForegroundColor Green
+                        Write-ITLog -Action "Local Cache Copy: $DisplayName" -Result "Copied from $($candItem.FullName)" -Level "SUCCESS"
+                        return $true
+                    }
+                }
+            } catch {
+                # Fall through to internet download
+            }
+        }
+    }
+
+    # 3. HTTP Download from Web
     Write-Host "[*] Downloading $DisplayName..." -ForegroundColor Cyan
     Write-Host "    Source: $Url" -ForegroundColor Gray
     Write-Host "    Dest:   $DestinationPath" -ForegroundColor Gray
 
     try {
+        $destFolder = Split-Path -Path $DestinationPath -Parent
+        if ($destFolder -and -not (Test-Path -Path $destFolder)) {
+            New-Item -Path $destFolder -ItemType Directory -Force | Out-Null
+        }
+
         Invoke-WebRequest -Uri $Url -OutFile $DestinationPath -UseBasicParsing -ErrorAction Stop
 
         if (Test-Path -Path $DestinationPath) {
             $fileSizeMB = [math]::Round(((Get-Item -Path $DestinationPath).Length / 1MB), 2)
             Write-Host "[+] Download completed ($fileSizeMB MB)" -ForegroundColor Green
+            Write-ITLog -Action "Download: $DisplayName" -Result "Completed ($fileSizeMB MB)" -Level "SUCCESS"
             return $true
         } else {
             throw "Downloaded file not found at destination."
@@ -154,7 +251,7 @@ function Cleanup-TempFolder {
 # ==============================================================================
 function Install-GoogleChromeInternal {
     $downloadUrl = "https://dl.google.com/chrome/install/latest/chrome_installer.exe"
-    $installerPath = "$Script:TempDir\chrome_installer.exe"
+    $installerPath = "$Script:DownloadDir\chrome_installer.exe"
 
     Write-ITLog -Action "Chrome Installation" -Result "Started" -Level "INFO"
 
@@ -177,14 +274,12 @@ function Install-GoogleChromeInternal {
         Write-Host "[-] Chrome installation failed: $($_.Exception.Message)" -ForegroundColor Red
         Write-ITLog -Action "Chrome Installation" -Result "Failed: $($_.Exception.Message)" -Level "ERROR"
         return $false
-    } finally {
-        if (Test-Path $installerPath) { Remove-Item $installerPath -Force -ErrorAction SilentlyContinue }
     }
 }
 
 function Install-MozillaFirefoxInternal {
     $downloadUrl = "https://download.mozilla.org/?product=firefox-latest-ssl&os=win64&lang=en-US"
-    $installerPath = "$Script:TempDir\FirefoxSetup.exe"
+    $installerPath = "$Script:DownloadDir\FirefoxSetup.exe"
 
     Write-ITLog -Action "Firefox Installation" -Result "Started" -Level "INFO"
 
@@ -207,8 +302,6 @@ function Install-MozillaFirefoxInternal {
         Write-Host "[-] Firefox installation failed: $($_.Exception.Message)" -ForegroundColor Red
         Write-ITLog -Action "Firefox Installation" -Result "Failed: $($_.Exception.Message)" -Level "ERROR"
         return $false
-    } finally {
-        if (Test-Path $installerPath) { Remove-Item $installerPath -Force -ErrorAction SilentlyContinue }
     }
 }
 
@@ -231,7 +324,7 @@ function Menu-InstallBrowsers {
 # ==============================================================================
 function Install-MicroSIPInternal {
     $downloadUrl = "$Script:BaseRawUrl/Software/MicroSIP.exe"
-    $installerPath = "$Script:TempDir\MicroSIP.exe"
+    $installerPath = "$Script:DownloadDir\MicroSIP.exe"
 
     Write-ITLog -Action "MicroSIP Installation" -Result "Started" -Level "INFO"
 
@@ -261,8 +354,6 @@ function Install-MicroSIPInternal {
         Write-Host "[-] MicroSIP installation failed: $($_.Exception.Message)" -ForegroundColor Red
         Write-ITLog -Action "MicroSIP Installation" -Result "Failed: $($_.Exception.Message)" -Level "ERROR"
         return $false
-    } finally {
-        if (Test-Path $installerPath) { Remove-Item $installerPath -Force -ErrorAction SilentlyContinue }
     }
 }
 
@@ -499,7 +590,7 @@ function Import-OpenVPNConfigInternal {
 function Install-OpenVPNInternal {
     # Official OpenVPN Connect Client v3 (Corporate Client)
     $downloadUrl = "https://openvpn.net/downloads/openvpn-connect-v3-windows.msi"
-    $installerPath = "$Script:TempDir\openvpn-connect-v3-windows.msi"
+    $installerPath = "$Script:DownloadDir\openvpn-connect-v3-windows.msi"
 
     Write-ITLog -Action "OpenVPN Connect Installation" -Result "Started" -Level "INFO"
     
@@ -534,8 +625,6 @@ function Install-OpenVPNInternal {
         Write-Host "[-] OpenVPN Connect installation failed: $($_.Exception.Message)" -ForegroundColor Red
         Write-ITLog -Action "OpenVPN Connect Installation" -Result "Failed: $($_.Exception.Message)" -Level "ERROR"
         return $false
-    } finally {
-        if (Test-Path $installerPath) { Remove-Item $installerPath -Force -ErrorAction SilentlyContinue }
     }
 }
 
@@ -593,7 +682,7 @@ function Menu-InstallVoipAndVpn {
 # ==============================================================================
 function Install-AnyDeskInternal {
     $downloadUrl = "$Script:BaseRawUrl/Software/AnyDesk.exe"
-    $installerPath = "$Script:TempDir\AnyDesk.exe"
+    $installerPath = "$Script:DownloadDir\AnyDesk.exe"
 
     Write-ITLog -Action "AnyDesk Installation" -Result "Started" -Level "INFO"
 
@@ -620,14 +709,12 @@ function Install-AnyDeskInternal {
         Write-Host "[-] AnyDesk installation failed: $($_.Exception.Message)" -ForegroundColor Red
         Write-ITLog -Action "AnyDesk Installation" -Result "Failed: $($_.Exception.Message)" -Level "ERROR"
         return $false
-    } finally {
-        if (Test-Path $installerPath) { Remove-Item $installerPath -Force -ErrorAction SilentlyContinue }
     }
 }
 
 function Install-UltraViewerInternal {
     $downloadUrl = "$Script:BaseRawUrl/Software/UltraViewer.exe"
-    $installerPath = "$Script:TempDir\UltraViewer.exe"
+    $installerPath = "$Script:DownloadDir\UltraViewer.exe"
 
     Write-ITLog -Action "UltraViewer Installation" -Result "Started" -Level "INFO"
 
@@ -650,8 +737,6 @@ function Install-UltraViewerInternal {
         Write-Host "[-] UltraViewer installation failed: $($_.Exception.Message)" -ForegroundColor Red
         Write-ITLog -Action "UltraViewer Installation" -Result "Failed: $($_.Exception.Message)" -Level "ERROR"
         return $false
-    } finally {
-        if (Test-Path $installerPath) { Remove-Item $installerPath -Force -ErrorAction SilentlyContinue }
     }
 }
 
@@ -681,7 +766,7 @@ function Menu-InstallDotMaxDriver {
     $fileName = "Driver software for Windows-72.exe"
     $encodedFileName = [System.Uri]::EscapeDataString($fileName)
     $downloadUrl = "$Script:BaseRawUrl/Software/$encodedFileName"
-    $installerPath = "$Script:TempDir\$fileName"
+    $installerPath = "$Script:DownloadDir\$fileName"
 
     Write-ITLog -Action "DotMAX Driver Installation" -Result "Started (Interactive Mode)" -Level "INFO"
 
@@ -750,8 +835,6 @@ function Menu-InstallDotMaxDriver {
     } catch {
         Write-Host "[-] Failed to execute driver installer: $($_.Exception.Message)" -ForegroundColor Red
         Write-ITLog -Action "DotMAX Driver Installation" -Result "Failed: $($_.Exception.Message)" -Level "ERROR"
-    } finally {
-        if (Test-Path $installerPath) { Remove-Item $installerPath -Force -ErrorAction SilentlyContinue }
     }
 
     Write-Host ""
@@ -769,7 +852,7 @@ function Install-CanonLBP6030Internal {
     #>
     $zipFileName   = "Canon_LBP6030_Driver.zip"
     $downloadUrl   = "$Script:BaseRawUrl/Software/$zipFileName"
-    $zipPath       = "$Script:TempDir\$zipFileName"
+    $zipPath       = "$Script:DownloadDir\$zipFileName"
     $extractDir    = "$Script:TempDir\CanonDriver"
     $infPath       = "$extractDir\cnnx0_cb3_len-GB.inf"
     $driverName    = "Canon LBP6030/6040/6018L XPS"
@@ -824,7 +907,6 @@ function Install-CanonLBP6030Internal {
         Write-ITLog -Action "Canon LBP6030 Driver Installation" -Result "Failed: $($_.Exception.Message)" -Level "ERROR"
         return $false
     } finally {
-        if (Test-Path $zipPath) { Remove-Item $zipPath -Force -ErrorAction SilentlyContinue }
         if (Test-Path $extractDir) { Remove-Item $extractDir -Recurse -Force -ErrorAction SilentlyContinue }
     }
 }
@@ -842,23 +924,191 @@ function Menu-InstallCanonLBP6030 {
 }
 
 # ==============================================================================
-# [6] DEPLOY PRINT SERVER & SECURITY RULES
+# [6] INSTALL HP LASERJET PRO M12a PRINTER DRIVER (AUTOMATED PNP)
+# ==============================================================================
+function Install-HPM12aInternal {
+    <#
+    .SYNOPSIS
+        Automates HP LaserJet Pro M12a driver injection into Windows Driver Store
+        via pnputil and registers it with the Windows Print Spooler.
+    #>
+    $zipFileName   = "HP_LaserJet_M12a_Driver.zip"
+    $downloadUrl   = "$Script:BaseRawUrl/Software/$zipFileName"
+    $zipPath       = "$Script:DownloadDir\$zipFileName"
+    $extractDir    = "$Script:TempDir\HPM12aDriver"
+    $infPath       = "$extractDir\HPM11M13.INF"
+    $driverName    = "HP LaserJet Pro M12a"
+
+    Write-ITLog -Action "HP LaserJet M12a Driver Installation" -Result "Started" -Level "INFO"
+
+    $downloadSuccess = Download-FileWithProgress -Url $downloadUrl -DestinationPath $zipPath -DisplayName "HP LaserJet M12a Driver"
+    if (-not $downloadSuccess) { return $false }
+
+    Write-Host "[*] Extracting HP LaserJet Pro M12a driver package..." -ForegroundColor Cyan
+    try {
+        if (-not (Test-Path $extractDir)) { New-Item -Path $extractDir -ItemType Directory -Force | Out-Null }
+        Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
+
+        if (-not (Test-Path $infPath)) {
+            throw "Driver INF file not found at expected path: $infPath"
+        }
+
+        Write-Host "[*] Staging HP driver in Windows Driver Store (pnputil)..." -ForegroundColor Cyan
+        $pnpProcess = Start-Process -FilePath "pnputil.exe" -ArgumentList "/add-driver `"$infPath`" /install" -Wait -PassThru -NoNewWindow
+        Write-Host "    PnP Driver Store staging completed." -ForegroundColor Gray
+
+        # Register driver with Windows Print Spooler
+        Write-Host "[*] Registering '$driverName' with Windows Print Spooler..." -ForegroundColor Cyan
+        try {
+            Add-PrinterDriver -Name $driverName -ErrorAction SilentlyContinue
+            Write-Host "[+] Driver '$driverName' registered successfully in Print Spooler!" -ForegroundColor Green
+        } catch {
+            Write-Host "[!] Spooler notice: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+
+        # Check existing printer queue
+        $existingPrinter = Get-Printer -Name "HP LaserJet Pro M12a" -ErrorAction SilentlyContinue
+        if (-not $existingPrinter) {
+            Write-Host "[+] HP LaserJet Pro M12a is staged and Plug-and-Play ready! Connecting via USB will initialize it instantly." -ForegroundColor Green
+        } else {
+            Write-Host "[+] Printer 'HP LaserJet Pro M12a' is already installed." -ForegroundColor Green
+        }
+
+        Write-ITLog -Action "HP LaserJet M12a Driver Installation" -Result "Completed Successfully (PnP Ready)" -Level "SUCCESS"
+        return $true
+    } catch {
+        Write-Host "[-] HP LaserJet M12a driver installation failed: $($_.Exception.Message)" -ForegroundColor Red
+        Write-ITLog -Action "HP LaserJet M12a Driver Installation" -Result "Failed: $($_.Exception.Message)" -Level "ERROR"
+        return $false
+    } finally {
+        if (Test-Path $extractDir) { Remove-Item $extractDir -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+function Menu-InstallHPM12aDriver {
+    Clear-Host
+    Write-Host "=================================================" -ForegroundColor Cyan
+    Write-Host "   INSTALL HP LASERJET PRO M12a PRINTER DRIVER   " -ForegroundColor Yellow
+    Write-Host "=================================================" -ForegroundColor Cyan
+    Write-Host "Automated driver installation for HP LaserJet Pro M12a Series." -ForegroundColor Gray
+    Write-Host ""
+    Install-HPM12aInternal | Out-Null
+    Write-Host ""
+    Read-Host "Press Enter to return to main menu..."
+}
+
+# ==============================================================================
+# [7] INSTALL GPRINTER THERMAL LABEL DRIVER (SEAGULL SCIENTIFIC)
+# ==============================================================================
+function Install-GprinterInternal {
+    <#
+    .SYNOPSIS
+        Installs Gprinter Thermal Label/Barcode Printer drivers (Seagull Scientific 11.5).
+        Stages Gprinter.inf into Windows Driver Store and provides Driver Wizard support.
+    #>
+    $zipFileName   = "Gprinter_Driver.zip"
+    $downloadUrl   = "$Script:BaseRawUrl/Software/$zipFileName"
+    $zipPath       = "$Script:DownloadDir\$zipFileName"
+    $extractDir    = "$Script:TempDir\GprinterDriver"
+    $infPath       = "$extractDir\Gprinter.inf"
+    $wizardPath    = "$extractDir\DriverWizard.exe"
+
+    Write-ITLog -Action "Gprinter Driver Installation" -Result "Started" -Level "INFO"
+
+    $downloadSuccess = Download-FileWithProgress -Url $downloadUrl -DestinationPath $zipPath -DisplayName "Gprinter Driver Package"
+    if (-not $downloadSuccess) { return $false }
+
+    Write-Host "[*] Extracting Gprinter thermal label driver package..." -ForegroundColor Cyan
+    try {
+        if (-not (Test-Path $extractDir)) { New-Item -Path $extractDir -ItemType Directory -Force | Out-Null }
+        Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
+
+        if (-not (Test-Path $infPath)) {
+            throw "Driver INF file not found at expected path: $infPath"
+        }
+
+        # Stage Gprinter driver in Windows Driver Store
+        Write-Host "[*] Staging Gprinter driver in Windows Driver Store (pnputil)..." -ForegroundColor Cyan
+        $pnpProcess = Start-Process -FilePath "pnputil.exe" -ArgumentList "/add-driver `"$infPath`" /install" -Wait -PassThru -NoNewWindow
+        Write-Host "[+] Gprinter driver package successfully staged in Windows Driver Store!" -ForegroundColor Green
+        Write-Host "    (Gprinter GP-1324D, GP-3120TU, GP-2120TF, etc. are Plug-and-Play ready)" -ForegroundColor Gray
+        Write-ITLog -Action "Gprinter Driver Installation" -Result "Successfully Staged (PnP Ready)" -Level "SUCCESS"
+
+        # Offer to launch Seagull Driver Wizard if technician wants to configure model/port now
+        if (Test-Path -Path $wizardPath) {
+            Write-Host ""
+            Write-Host "[?] Do you want to open Seagull Driver Wizard now to select a specific printer/USB port?" -ForegroundColor Yellow
+            $openWiz = Read-Host "Launch Driver Wizard now? (Y/N)"
+            if ($openWiz -match '^[Yy]$') {
+                Write-Host "[*] Launching Seagull Driver Wizard..." -ForegroundColor Cyan
+                $proc = Start-Process -FilePath $wizardPath -PassThru
+                Start-Sleep -Seconds 2
+                while (-not $proc.HasExited) {
+                    try {
+                        if ([Console]::KeyAvailable) {
+                            $k = [Console]::ReadKey($true)
+                            if ($k.Key -eq [ConsoleKey]::Enter -or $k.Key -eq [ConsoleKey]::Spacebar) {
+                                Write-Host "`n[*] Manual continuation signaled by technician." -ForegroundColor Cyan
+                                break
+                            }
+                        }
+                    } catch {}
+                    $proc.Refresh()
+                    if ($proc.MainWindowHandle -eq [System.IntPtr]::Zero) {
+                        Start-Sleep -Seconds 1
+                        $proc.Refresh()
+                        if ($proc.MainWindowHandle -eq [System.IntPtr]::Zero) {
+                            Write-Host "`n[+] Driver Wizard closed." -ForegroundColor Green
+                            break
+                        }
+                    }
+                    Start-Sleep -Milliseconds 800
+                }
+                if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
+            }
+        }
+
+        return $true
+    } catch {
+        Write-Host "[-] Gprinter driver installation failed: $($_.Exception.Message)" -ForegroundColor Red
+        Write-ITLog -Action "Gprinter Driver Installation" -Result "Failed: $($_.Exception.Message)" -Level "ERROR"
+        return $false
+    } finally {
+        if (Test-Path $extractDir) { Remove-Item $extractDir -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+function Menu-InstallGprinterDriver {
+    Clear-Host
+    Write-Host "=================================================" -ForegroundColor Cyan
+    Write-Host "     INSTALL GPRINTER THERMAL LABEL DRIVER       " -ForegroundColor Yellow
+    Write-Host "=================================================" -ForegroundColor Cyan
+    Write-Host "Supports all Carrybee Gprinter barcode/waybill printers" -ForegroundColor Gray
+    Write-Host "(GP-1324D, GP-3120TU, GP-2120TF, GP-80250, etc.)" -ForegroundColor Gray
+    Write-Host ""
+    Install-GprinterInternal | Out-Null
+    Write-Host ""
+    Read-Host "Press Enter to return to main menu..."
+}
+
+# ==============================================================================
+# [8] DEPLOY PRINT SERVER & SECURITY RULES
 # ==============================================================================
 function Deploy-PrintServerInternal {
     $fileName = "PrintServer.exe"
     $downloadUrl = "$Script:BaseRawUrl/Software/$fileName"
     $targetFolder = $Script:CompanyDir
     $targetFile = "$targetFolder\$fileName"
-    $tempFile = "$Script:TempDir\$fileName"
+    $cachedFile = "$Script:DownloadDir\$fileName"
 
     Write-ITLog -Action "PrintServer Deployment" -Result "Started" -Level "INFO"
 
-    $downloadSuccess = Download-FileWithProgress -Url $downloadUrl -DestinationPath $tempFile -DisplayName "Print Server Application"
+    $downloadSuccess = Download-FileWithProgress -Url $downloadUrl -DestinationPath $cachedFile -DisplayName "Print Server Application"
     if (-not $downloadSuccess) { return $false }
 
     try {
         if (-not (Test-Path $targetFolder)) { New-Item -Path $targetFolder -ItemType Directory -Force | Out-Null }
-        Copy-Item -Path $tempFile -Destination $targetFile -Force
+        Copy-Item -Path $cachedFile -Destination $targetFile -Force
         Write-Host "[+] Copied application to: $targetFile" -ForegroundColor Green
 
         # Create Desktop Shortcut
@@ -919,8 +1169,6 @@ function Deploy-PrintServerInternal {
         Write-Host "[-] Error deploying Print Server: $($_.Exception.Message)" -ForegroundColor Red
         Write-ITLog -Action "PrintServer Deployment" -Result "Failed: $($_.Exception.Message)" -Level "ERROR"
         return $false
-    } finally {
-        if (Test-Path $tempFile) { Remove-Item $tempFile -Force -ErrorAction SilentlyContinue }
     }
 }
 
@@ -935,7 +1183,7 @@ function Menu-DeployPrintServer {
 }
 
 # ==============================================================================
-# [6] DEVICE INFORMATION & RENAME
+# [9] DEVICE INFORMATION & RENAME
 # ==============================================================================
 function Menu-ShowDeviceInformation {
     Clear-Host
@@ -999,7 +1247,7 @@ function Menu-ShowDeviceInformation {
 }
 
 # ==============================================================================
-# [7] NETWORK DIAGNOSTICS & CONNECTIVITY SUITE
+# [10] NETWORK DIAGNOSTICS & CONNECTIVITY SUITE
 # ==============================================================================
 function Menu-NetworkDiagnostics {
     Clear-Host
@@ -1083,7 +1331,7 @@ function Menu-NetworkDiagnostics {
 }
 
 # ==============================================================================
-# [8] WINDOWS OS REPAIR & CLEANUP (SFC, DISM, TEMP CLEAN)
+# [11] WINDOWS OS REPAIR & CLEANUP (SFC, DISM, TEMP CLEAN)
 # ==============================================================================
 function Menu-SystemRepairAndCleanup {
     Clear-Host
@@ -1140,7 +1388,7 @@ function Menu-SystemRepairAndCleanup {
 }
 
 # ==============================================================================
-# [9] WINDOWS DEBLOAT & PERFORMANCE TWEAKS
+# [12] WINDOWS DEBLOAT & PERFORMANCE TWEAKS
 # ==============================================================================
 function Optimize-WindowsPerformanceInternal {
     Write-Host "[*] Applying High Performance Power Scheme..." -ForegroundColor Cyan
@@ -1181,7 +1429,7 @@ function Menu-WindowsTweaks {
 }
 
 # ==============================================================================
-# [10] EXPORT PC INFORMATION REPORT
+# [13] EXPORT PC INFORMATION REPORT
 # ==============================================================================
 function Export-PCReportInternal {
     $desktopPath = [Environment]::GetFolderPath("Desktop")
@@ -1292,7 +1540,7 @@ function Menu-FastOnboardAll {
     Write-Host "  1. Google Chrome & Mozilla Firefox"
     Write-Host "  2. MicroSIP VoIP & OpenVPN (+ Carrybee OVPN profile)"
     Write-Host "  3. AnyDesk & UltraViewer Remote Support"
-    Write-Host "  4. Print Server deployment & Defender exclusions"
+    Write-Host "  4. Canon, HP M12a, Gprinter Drivers & Print Server"
     Write-Host "  5. Windows Performance Tweaks & NTP Time Resync"
     Write-Host "  6. Automatic PC Inventory Report Export"
     Write-Host "============================================================" -ForegroundColor Cyan
@@ -1315,8 +1563,10 @@ function Menu-FastOnboardAll {
     Install-AnyDeskInternal | Out-Null
     Install-UltraViewerInternal | Out-Null
 
-    Write-Host "`n[STAGE 4/6] Deploying Canon Driver, Print Server & Security..." -ForegroundColor Magenta
+    Write-Host "`n[STAGE 4/6] Deploying Canon, HP M12a, Gprinter Drivers & Print Server..." -ForegroundColor Magenta
     Install-CanonLBP6030Internal | Out-Null
+    Install-HPM12aInternal | Out-Null
+    Install-GprinterInternal | Out-Null
     Deploy-PrintServerInternal | Out-Null
 
     Write-Host "`n[STAGE 5/6] Applying Windows Optimization & NTP Clock Sync..." -ForegroundColor Magenta
@@ -1366,25 +1616,27 @@ function Show-MainMenu {
         Write-Host "=================================================" -ForegroundColor Cyan
         Write-Host " [0]  ⚡ RUN COMPLETE PROVISIONING BUNDLE        " -ForegroundColor Green
         Write-Host ""
-        Write-Host " --- SOFTWARE DEPLOYMENTS ---                    " -ForegroundColor Gray
+        Write-Host " --- SOFTWARE & PRINTER DEPLOYMENTS ---          " -ForegroundColor Gray
         Write-Host " [1]  Install Web Browsers (Chrome & Firefox)    " -ForegroundColor White
         Write-Host " [2]  Install VoIP & VPN (MicroSIP & OpenVPN Connect)" -ForegroundColor White
         Write-Host " [3]  Install Remote Support (AnyDesk / Ultra)   " -ForegroundColor White
         Write-Host " [4]  Install DotMAX Printer Driver (Wizard)     " -ForegroundColor White
         Write-Host " [5]  Install Canon LBP6030 Driver (Automated PnP)" -ForegroundColor White
-        Write-Host " [6]  Deploy Print Server & Security Rules       " -ForegroundColor White
+        Write-Host " [6]  Install HP LaserJet Pro M12a Driver (Auto PnP)" -ForegroundColor White
+        Write-Host " [7]  Install Gprinter Label Printer Driver (Thermal)" -ForegroundColor White
+        Write-Host " [8]  Deploy Print Server & Security Rules       " -ForegroundColor White
         Write-Host ""
         Write-Host " --- SYSTEM & NETWORK UTILITIES ---              " -ForegroundColor Gray
-        Write-Host " [7]  Device Information & Rename PC             " -ForegroundColor White
-        Write-Host " [8]  Network Diagnostics & Health Suite         " -ForegroundColor White
-        Write-Host " [9]  Windows OS Repair & Cleanup (SFC/DISM/Temp)" -ForegroundColor White
-        Write-Host " [10] Windows Debloat & Performance Tweaks       " -ForegroundColor White
-        Write-Host " [11] Export PC Inventory Report                 " -ForegroundColor White
+        Write-Host " [9]  Device Information & Rename PC             " -ForegroundColor White
+        Write-Host " [10] Network Diagnostics & Health Suite         " -ForegroundColor White
+        Write-Host " [11] Windows OS Repair & Cleanup (SFC/DISM/Temp)" -ForegroundColor White
+        Write-Host " [12] Windows Debloat & Performance Tweaks       " -ForegroundColor White
+        Write-Host " [13] Export PC Inventory Report                 " -ForegroundColor White
         Write-Host ""
         Write-Host " [X]  Exit                                       " -ForegroundColor Red
         Write-Host "=================================================" -ForegroundColor Cyan
         
-        $selection = Read-Host "Select an option [0-11 or X]"
+        $selection = Read-Host "Select an option [0-13 or X]"
 
         switch ($selection.Trim().ToUpper()) {
             "0"  { Menu-FastOnboardAll }
@@ -1393,12 +1645,14 @@ function Show-MainMenu {
             "3"  { Menu-InstallRemoteSupport }
             "4"  { Menu-InstallDotMaxDriver }
             "5"  { Menu-InstallCanonLBP6030 }
-            "6"  { Menu-DeployPrintServer }
-            "7"  { Menu-ShowDeviceInformation }
-            "8"  { Menu-NetworkDiagnostics }
-            "9"  { Menu-SystemRepairAndCleanup }
-            "10" { Menu-WindowsTweaks }
-            "11" { Menu-ExportReport }
+            "6"  { Menu-InstallHPM12aDriver }
+            "7"  { Menu-InstallGprinterDriver }
+            "8"  { Menu-DeployPrintServer }
+            "9"  { Menu-ShowDeviceInformation }
+            "10" { Menu-NetworkDiagnostics }
+            "11" { Menu-SystemRepairAndCleanup }
+            "12" { Menu-WindowsTweaks }
+            "13" { Menu-ExportReport }
             "X"  {
                 Write-Host "`n[*] Exiting Carrybee IT Tool. Goodbye!" -ForegroundColor Cyan
                 Write-ITLog -Action "Session Terminated" -Result "User exited menu" -Level "INFO"
