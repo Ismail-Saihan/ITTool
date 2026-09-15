@@ -1319,7 +1319,9 @@ function Get-AssetInformationString {
     <#
     .SYNOPSIS
         Generates formatted asset inventory string for QR code and label printing:
-        Format: "i5 11th Gen, RAM 16GB, SSD 512 GB, 14-inch, SN# 5CD124NJSM, BSN# 5CD124NJSM"
+        Target Format strictly:
+        - "AMD Ryzen 5 PRO 5650U, RAM 16GB, SSD 256 GB, 14-inch, SN# 2TK2160P7R, BSN# 2TK2160P7R"
+        - "i5 11th Gen, RAM 16GB, SSD 512 GB, 14-inch, SN# 2TK10508L8, BSN# 2TK10603TR"
     #>
     # 1. CPU Short Branding
     $cpuRaw = ""
@@ -1328,7 +1330,11 @@ function Get-AssetInformationString {
     } catch {}
 
     $cpuShort = "CPU"
-    if ($cpuRaw -match '(?i)(i[3579])-(\d{4,5}[A-Z\d]*)') {
+    # Case A: AMD Ryzen Processors (e.g. "AMD Ryzen 5 PRO 5650U with Radeon Graphics" -> "AMD Ryzen 5 PRO 5650U")
+    if ($cpuRaw -match '(?i)AMD\s+Ryzen(\s+[3579]|\s+Threadripper)?(\s+PRO)?\s+[A-Z\d]+') {
+        $cpuShort = $Matches[0].Trim()
+    # Case B: Intel Core processors with model suffix (e.g. i5-1135G7, i7-10700, i5-9400)
+    } elseif ($cpuRaw -match '(?i)(i[3579])-(\d{4,5}[A-Z\d]*)') {
         $tier = $Matches[1].ToLower()
         $numPart = $Matches[2]
         $genNum = if ($numPart -match '^1[0-9]') { $numPart.Substring(0, 2) } elseif ($numPart -match '^[2-9]') { $numPart.Substring(0, 1) } else { "" }
@@ -1338,15 +1344,18 @@ function Get-AssetInformationString {
         } else {
             $cpuShort = $tier
         }
+    # Case C: Intel Core with explicit "11th Gen" prefix
     } elseif ($cpuRaw -match '(?i)(\d{1,2})th Gen.*?(i[3579])') {
         $cpuShort = "$($Matches[2].ToLower()) $($Matches[1])th Gen"
-    } elseif ($cpuRaw -match 'Ryzen \d \d{4}') {
-        $cpuShort = $Matches[0]
+    # Case D: Other AMD CPUs
+    } elseif ($cpuRaw -match '(?i)AMD\s+') {
+        $cpuShort = ($cpuRaw -replace '(?i)with Radeon.*', '' -replace '(?i)\d+-Core Processor.*', '' -replace '(?i)Processor.*', '' -replace '(?i)@.*', '').Trim()
+    # Case E: Other Intel / Generic CPUs
     } elseif ($cpuRaw) {
-        $cpuShort = ($cpuRaw -replace '(?i)Intel\(R\)\s*Core\(TM\)\s*', '' -replace '(?i)@.*', '').Trim()
+        $cpuShort = ($cpuRaw -replace '(?i)Intel\(R\)\s*Core\(TM\)\s*', '' -replace '(?i)CPU @.*', '' -replace '(?i)@.*', '').Trim()
     }
 
-    # 2. RAM (GB)
+    # 2. RAM (GB) - Strict Format: "RAM 16GB"
     $ramStr = "RAM 8GB"
     try {
         $totalRamBytes = (Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).TotalPhysicalMemory
@@ -1356,18 +1365,20 @@ function Get-AssetInformationString {
         }
     } catch {}
 
-    # 3. SSD / Storage
+    # 3. SSD / Storage - Strict Format: "SSD 256 GB" or "SSD 512 GB"
     $diskStr = "SSD 512 GB"
     try {
         $pDisks = Get-PhysicalDisk -ErrorAction SilentlyContinue
-        $targetDisk = $pDisks | Where-Object { $_.MediaType -eq 'SSD' } | Select-Object -First 1
+        $targetDisk = $pDisks | Where-Object { $_.MediaType -eq 'SSD' -or $_.BusType -eq 'NVMe' } | Select-Object -First 1
         if (-not $targetDisk) { $targetDisk = $pDisks | Select-Object -First 1 }
         
         $rawGB = 0
         $dType = "SSD"
         if ($targetDisk) {
             $rawGB = [math]::Round($targetDisk.Size / 1GB)
-            if ($targetDisk.MediaType) { $dType = $targetDisk.MediaType }
+            if ($targetDisk.MediaType -eq 'HDD' -and -not ($pDisks | Where-Object { $_.MediaType -eq 'SSD' })) {
+                $dType = "HDD"
+            }
         } else {
             $cDrive = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'" -ErrorAction SilentlyContinue
             if ($cDrive) { $rawGB = [math]::Round($cDrive.Size / 1GB) }
@@ -1390,7 +1401,7 @@ function Get-AssetInformationString {
         }
     } catch {}
 
-    # 4. Screen Size
+    # 4. Screen Size - Strict Format: "14-inch"
     $screenStr = "14-inch"
     try {
         $mon = Get-CimInstance -Namespace root\wmi -ClassName WmiMonitorBasicDisplayParams -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -1401,27 +1412,61 @@ function Get-AssetInformationString {
                 $screenStr = "14-inch"
             } elseif ($diagInches -ge 15.0 -and $diagInches -le 16.0) {
                 $screenStr = "15.6-inch"
-            } elseif ($diagInches -ge 13.0 -and $diagInches -le 13.5) {
+            } elseif ($diagInches -ge 13.0 -and $diagInches -lt 13.5) {
                 $screenStr = "13.3-inch"
+            } elseif ($diagInches -ge 16.0 -and $diagInches -le 17.5) {
+                $screenStr = "17-inch"
             } else {
                 $screenStr = "$([math]::Round($diagInches))-inch"
             }
         }
     } catch {}
 
-    # 5. Serial Numbers (SN# and BSN#)
-    $bsn = "N/A"
+    # 5. Serial Numbers - Strict Format: "SN# <SN>, BSN# <BSN>"
     $sn = "N/A"
-    try {
-        $bios = Get-CimInstance Win32_BIOS -ErrorAction SilentlyContinue
-        if ($bios -and $bios.SerialNumber) { $bsn = $bios.SerialNumber.Trim() }
-    } catch {}
+    $bsn = "N/A"
+
+    # Query System Serial Number (SN#)
     try {
         $csp = Get-CimInstance Win32_ComputerSystemProduct -ErrorAction SilentlyContinue
-        if ($csp -and $csp.IdentifyingNumber) { $sn = $csp.IdentifyingNumber.Trim() }
+        if ($csp -and $csp.IdentifyingNumber) {
+            $idNum = $csp.IdentifyingNumber.Trim()
+            if ($idNum -and $idNum -notmatch '(?i)Default|None|To be filled|System Serial|O.E.M.') {
+                $sn = $idNum
+            }
+        }
     } catch {}
-    if ($sn -eq "N/A" -or [string]::IsNullOrWhiteSpace($sn)) { $sn = $bsn }
-    if ($bsn -eq "N/A" -or [string]::IsNullOrWhiteSpace($bsn)) { $bsn = $sn }
+
+    if ($sn -eq "N/A") {
+        try {
+            $bios = Get-CimInstance Win32_BIOS -ErrorAction SilentlyContinue
+            if ($bios -and $bios.SerialNumber) {
+                $biosNum = $bios.SerialNumber.Trim()
+                if ($biosNum -and $biosNum -notmatch '(?i)Default|None|To be filled|System Serial|O.E.M.') {
+                    $sn = $biosNum
+                }
+            }
+        } catch {}
+    }
+
+    # Query BaseBoard Serial Number (BSN# - Motherboard Serial)
+    try {
+        $bb = Get-CimInstance Win32_BaseBoard -ErrorAction SilentlyContinue
+        if ($bb -and $bb.SerialNumber) {
+            $bbNum = $bb.SerialNumber.Trim()
+            if ($bbNum -and $bbNum -notmatch '(?i)Default|None|To be filled|Base Board|O.E.M.') {
+                $bsn = $bbNum
+            }
+        }
+    } catch {}
+
+    # Fallback resolution between SN and BSN
+    if ($bsn -eq "N/A" -and $sn -ne "N/A") {
+        $bsn = $sn
+    }
+    if ($sn -eq "N/A" -and $bsn -ne "N/A") {
+        $sn = $bsn
+    }
 
     return "$cpuShort, $ramStr, $diskStr, $screenStr, SN# $sn, BSN# $bsn"
 }
@@ -1602,6 +1647,7 @@ function Show-DeviceSpecificationsInternal {
         $os      = Get-CimInstance -ClassName Win32_OperatingSystem
         $bios    = Get-CimInstance -ClassName Win32_BIOS
         $csp     = Get-CimInstance -ClassName Win32_ComputerSystemProduct -ErrorAction SilentlyContinue
+        $bb      = Get-CimInstance -ClassName Win32_BaseBoard -ErrorAction SilentlyContinue
         $cpu     = Get-CimInstance -ClassName Win32_Processor | Select-Object -First 1
         $ramGB   = [math]::Round(($cs.TotalPhysicalMemory / 1GB), 2)
         
@@ -1611,11 +1657,12 @@ function Show-DeviceSpecificationsInternal {
 
         $displayIp = if ($ipList) { $ipList } else { "N/A" }
         $displayMac = if ($macList) { $macList } else { "N/A" }
-        $sysSerial = if ($csp -and $csp.IdentifyingNumber) { $csp.IdentifyingNumber } else { $bios.SerialNumber }
+        $sysSerial = if ($csp -and $csp.IdentifyingNumber -and $csp.IdentifyingNumber -notmatch '(?i)Default|None|To be filled|System Serial|O.E.M.') { $csp.IdentifyingNumber.Trim() } else { $bios.SerialNumber }
+        $bbSerial  = if ($bb -and $bb.SerialNumber -and $bb.SerialNumber -notmatch '(?i)Default|None|To be filled|Base Board|O.E.M.') { $bb.SerialNumber.Trim() } else { $sysSerial }
 
-        Write-Host "Computer Name:       " -NoNewline; Write-Host $env:COMPUTERNAME -ForegroundColor Green
-        Write-Host "System Serial (SN):  " -NoNewline; Write-Host $sysSerial -ForegroundColor Green
-        Write-Host "BIOS Serial (BSN):   " -NoNewline; Write-Host $bios.SerialNumber -ForegroundColor Green
+        Write-Host "Computer Name:          " -NoNewline; Write-Host $env:COMPUTERNAME -ForegroundColor Green
+        Write-Host "System Serial (SN):     " -NoNewline; Write-Host $sysSerial -ForegroundColor Green
+        Write-Host "BaseBoard Serial (BSN): " -NoNewline; Write-Host $bbSerial -ForegroundColor Green
         Write-Host "Manufacturer:        " -NoNewline; Write-Host $cs.Manufacturer -ForegroundColor White
         Write-Host "Model:               " -NoNewline; Write-Host $cs.Model -ForegroundColor White
         Write-Host "CPU:                 " -NoNewline; Write-Host $cpu.Name.Trim() -ForegroundColor White
