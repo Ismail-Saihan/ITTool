@@ -1320,8 +1320,8 @@ function Get-AssetInformationString {
     .SYNOPSIS
         Generates formatted asset inventory string for QR code and label printing:
         Target Format strictly:
-        - "AMD Ryzen 5 PRO 5650U, RAM 16GB, SSD 256 GB, 14-inch, SN# 2TK2160P7R, BSN# 2TK2160P7R"
-        - "i5 11th Gen, RAM 16GB, SSD 512 GB, 14-inch, SN# 2TK10508L8, BSN# 2TK10603TR"
+        - "AMD Ryzen 5 PRO 5650U, RAM 16GB, SSD 256 GB, 14-inch, SN# 2TK220002G"
+        - "i5 11th Gen, RAM 16GB, SSD 512 GB, 14-inch, SN# 2TK10508L8"
     #>
     # 1. CPU Short Branding
     $cpuRaw = ""
@@ -1356,11 +1356,28 @@ function Get-AssetInformationString {
     }
 
     # 2. RAM (GB) - Strict Format: "RAM 16GB"
-    $ramStr = "RAM 8GB"
+    $ramStr = "RAM 16GB"
     try {
-        $totalRamBytes = (Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).TotalPhysicalMemory
-        if ($totalRamBytes -gt 0) {
-            $ramGB = [math]::Round($totalRamBytes / 1GB)
+        # Method 1: Physical hardware stick query (avoids AMD/Intel integrated GPU VRAM reservation)
+        $physMem = Get-CimInstance Win32_PhysicalMemory -ErrorAction SilentlyContinue
+        $totalBytes = ($physMem | Measure-Object -Property Capacity -Sum).Sum
+
+        # Method 2: OS TotalPhysicalMemory fallback
+        if (-not $totalBytes -or $totalBytes -le 0) {
+            $totalBytes = (Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).TotalPhysicalMemory
+        }
+
+        if ($totalBytes -gt 0) {
+            $rawGB = [math]::Round($totalBytes / 1GB)
+            # Snap to standard RAM capacities (e.g. 15GB -> 16GB, 7GB -> 8GB)
+            $stdRams = @(4, 8, 12, 16, 24, 32, 48, 64, 128)
+            $ramGB = $rawGB
+            foreach ($r in $stdRams) {
+                if ([math]::Abs($rawGB - $r) -le 1.5) {
+                    $ramGB = $r
+                    break
+                }
+            }
             $ramStr = "RAM ${ramGB}GB"
         }
     } catch {}
@@ -1422,9 +1439,8 @@ function Get-AssetInformationString {
         }
     } catch {}
 
-    # 5. Serial Numbers - Strict Format: "SN# <SN>, BSN# <BSN>"
+    # 5. Serial Number - Strict Format: "SN# <SN>"
     $sn = "N/A"
-    $bsn = "N/A"
 
     # Query System Serial Number (SN#)
     try {
@@ -1449,26 +1465,19 @@ function Get-AssetInformationString {
         } catch {}
     }
 
-    # Query BaseBoard Serial Number (BSN# - Motherboard Serial)
-    try {
-        $bb = Get-CimInstance Win32_BaseBoard -ErrorAction SilentlyContinue
-        if ($bb -and $bb.SerialNumber) {
-            $bbNum = $bb.SerialNumber.Trim()
-            if ($bbNum -and $bbNum -notmatch '(?i)Default|None|To be filled|Base Board|O.E.M.') {
-                $bsn = $bbNum
+    if ($sn -eq "N/A") {
+        try {
+            $bb = Get-CimInstance Win32_BaseBoard -ErrorAction SilentlyContinue
+            if ($bb -and $bb.SerialNumber) {
+                $bbNum = $bb.SerialNumber.Trim()
+                if ($bbNum -and $bbNum -notmatch '(?i)Default|None|To be filled|Base Board|O.E.M.') {
+                    $sn = $bbNum
+                }
             }
-        }
-    } catch {}
-
-    # Fallback resolution between SN and BSN
-    if ($bsn -eq "N/A" -and $sn -ne "N/A") {
-        $bsn = $sn
-    }
-    if ($sn -eq "N/A" -and $bsn -ne "N/A") {
-        $sn = $bsn
+        } catch {}
     }
 
-    return "$cpuShort, $ramStr, $diskStr, $screenStr, SN# $sn, BSN# $bsn"
+    return "$cpuShort, $ramStr, $diskStr, $screenStr, SN# $sn"
 }
 
 function Generate-AssetQRCodeInternal {

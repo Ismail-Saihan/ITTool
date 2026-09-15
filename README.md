@@ -85,8 +85,8 @@ irm https://raw.githubusercontent.com/Ismail-Saihan/ITTool/main/ITTool.ps1 | iex
 - **`[7] Gprinter Thermal Label Driver`:** Seagull Scientific driver package for TSC/TSPL label & barcode printing with automated PnP staging, spooler registration for GP-1324D / GP-3120TU / GP-2120TF, and Driver Wizard assistance.
 - **`[8] Print Server Deployment`:** Deploys `PrintServer.exe` to `C:\CompanyTools`, creates Desktop shortcut, configures Windows Defender exclusions, and detects Windows 11 Smart App Control.
 - **`[9] Device Information & Asset QR Code Suite`:** Submenu featuring:
-  - **View Specs:** Full hardware, OS, network, serial numbers (SN# and BSN#), and asset summary.
-  - **Asset QR Code Generator:** Generates `Desktop\Asset Information.png` and `.txt` with exact asset payload (e.g. `i5 11th Gen, RAM 16GB, SSD 512 GB, 14-inch, SN# 5CD124NJSM, BSN# 5CD124NJSM`) for quick barcode/QR scanner audit tagging.
+  - **View Specs:** Full hardware, OS, network, serial number (SN#), and asset summary.
+  - **Asset QR Code Generator:** Generates `Desktop\Asset Information.png` and `.txt` with exact asset payload (e.g. `AMD Ryzen 5 PRO 5650U, RAM 16GB, SSD 256 GB, 14-inch, SN# 2TK220002G`) for quick barcode/QR scanner audit tagging.
   - **Rename Computer:** Full RFC 1123 hostname support up to 63 characters with hyphens (e.g. `CBE-IT-LAPTOP-0633`) and dual-method WMI fallback.
 - **`[10] Network Diagnostics Suite`:** Gateway ping, DNS resolution checks, public IP query, and one-click DNS flush / Winsock stack reset.
 - **`[11] Windows OS Repair & Maintenance`:** SFC `/scannow`, DISM component repair, temporary cache cleanup, and SSD S.M.A.R.T. health checks.
