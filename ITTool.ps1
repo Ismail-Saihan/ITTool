@@ -1354,17 +1354,56 @@ function Menu-ShowDeviceInformation {
         Write-Host ""
         $renameChoice = Read-Host "Do you want to change computer name? (Y/N)"
         if ($renameChoice -match '^[Yy]$') {
-            $newName = Read-Host "Enter new computer name (max 15 characters, no spaces)"
-            if ([string]::IsNullOrWhiteSpace($newName) -or $newName.Length -gt 15) {
-                Write-Host "[-] Invalid name (must be 1-15 characters). Aborted." -ForegroundColor Red
+            $newName = (Read-Host "Enter new computer name (e.g. CBE-IT-LAPTOP-0633, max 63 characters)").Trim()
+            
+            # Windows / RFC 1123 Hostname Validation Rules (same as Windows Settings):
+            # 1. Length between 1 and 63 characters
+            # 2. Allowed characters: letters (A-Z, a-z), numbers (0-9), and hyphens (-)
+            # 3. Cannot start or end with a hyphen
+            # 4. Cannot consist entirely of numbers
+            $isValidFormat = $newName -match '^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?$'
+            $isNotAllNumbers = $newName -match '[a-zA-Z]'
+
+            if ([string]::IsNullOrWhiteSpace($newName) -or $newName.Length -gt 63 -or -not $isValidFormat -or -not $isNotAllNumbers) {
+                Write-Host "[-] Invalid computer name." -ForegroundColor Red
+                Write-Host "    Rules: 1-63 characters, letters, numbers, and hyphens (-) allowed." -ForegroundColor Yellow
+                Write-Host "    Cannot start/end with a hyphen and cannot contain spaces or special symbols." -ForegroundColor Yellow
             } else {
                 try {
-                    Rename-Computer -NewName $newName -Force -ErrorAction Stop
-                    Write-Host "[+] Computer successfully renamed to '$newName'." -ForegroundColor Green
-                    Write-Host "[!] A RESTART IS REQUIRED for the change to take effect." -ForegroundColor Yellow
-                    Write-ITLog -Action "Rename Computer" -Result "Renamed to $newName" -Level "SUCCESS"
+                    $renamed = $false
+                    # Method 1: PowerShell Rename-Computer cmdlet
+                    try {
+                        Rename-Computer -NewName $newName -Force -WarningAction SilentlyContinue -ErrorAction Stop
+                        $renamed = $true
+                    } catch {
+                        # Method 2: WMI/CIM fallback
+                        $csObj = Get-CimInstance -ClassName Win32_ComputerSystem
+                        $wmiResult = Invoke-CimMethod -InputObject $csObj -MethodName Rename -Arguments @{ Name = $newName } -ErrorAction Stop
+                        if ($wmiResult.ReturnValue -eq 0) {
+                            $renamed = $true
+                        } else {
+                            throw "WMI Rename returned error code $($wmiResult.ReturnValue)"
+                        }
+                    }
+
+                    if ($renamed) {
+                        Write-Host "[+] Computer successfully renamed to '$newName'!" -ForegroundColor Green
+                        if ($newName.Length -gt 15) {
+                            $netBiosName = $newName.Substring(0, 15)
+                            Write-Host "    Full Hostname: $newName | NetBIOS (Legacy): $netBiosName" -ForegroundColor Gray
+                        }
+                        Write-Host "[!] A RESTART IS REQUIRED for the change to take effect." -ForegroundColor Yellow
+                        Write-ITLog -Action "Rename Computer" -Result "Renamed to $newName" -Level "SUCCESS"
+
+                        $restartNow = Read-Host "`nDo you want to restart the computer now? (Y/N)"
+                        if ($restartNow -match '^[Yy]$') {
+                            Write-Host "[*] Restarting computer in 5 seconds..." -ForegroundColor Yellow
+                            Restart-Computer -Force
+                        }
+                    }
                 } catch {
                     Write-Host "[-] Failed to rename computer: $($_.Exception.Message)" -ForegroundColor Red
+                    Write-ITLog -Action "Rename Computer" -Result "Failed: $($_.Exception.Message)" -Level "ERROR"
                 }
             }
         }
