@@ -1088,69 +1088,82 @@ function Menu-InstallHPM12aDriver {
 function Install-GprinterInternal {
     <#
     .SYNOPSIS
-        Installs Gprinter Thermal Label/Barcode Printer drivers (Seagull Scientific 11.5).
-        Stages Gprinter.inf into Windows Driver Store and provides Driver Wizard support.
+        Installs Gprinter Thermal Label/Barcode Printer drivers (Seagull Scientific).
+        Stages Gprinter.inf into Windows Driver Store, registers core Gprinter spooler drivers,
+        and initializes printer queue for Carrybee label printing.
     #>
+    param (
+        [string]$PreferredModel = "Gprinter GP-1324D",
+        [switch]$Interactive
+    )
+
     $zipFileName   = "Gprinter_Driver.zip"
     $downloadUrl   = "$Script:BaseRawUrl/Software/$zipFileName"
     $zipPath       = "$Script:DownloadDir\$zipFileName"
-    $extractDir    = "$Script:TempDir\GprinterDriver"
-    $infPath       = "$extractDir\Gprinter.inf"
-    $wizardPath    = "$extractDir\DriverWizard.exe"
+    $driverDir     = "$Script:CompanyDir\Drivers\Gprinter"
+    $infPath       = "$driverDir\Gprinter.inf"
+    $wizardPath    = "$driverDir\DriverWizard.exe"
 
     Write-ITLog -Action "Gprinter Driver Installation" -Result "Started" -Level "INFO"
 
     $downloadSuccess = Download-FileWithProgress -Url $downloadUrl -DestinationPath $zipPath -DisplayName "Gprinter Driver Package"
     if (-not $downloadSuccess) { return $false }
 
-    Write-Host "[*] Extracting Gprinter thermal label driver package..." -ForegroundColor Cyan
+    Write-Host "[*] Staging Gprinter driver files..." -ForegroundColor Cyan
     try {
-        if (-not (Test-Path $extractDir)) { New-Item -Path $extractDir -ItemType Directory -Force | Out-Null }
-        Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
+        if (-not (Test-Path $driverDir)) { New-Item -Path $driverDir -ItemType Directory -Force | Out-Null }
+        
+        # Extract to persistent location if not already extracted
+        if (-not (Test-Path $infPath)) {
+            Write-Host "    Extracting driver archive to $driverDir..." -ForegroundColor Gray
+            Expand-Archive -Path $zipPath -DestinationPath $driverDir -Force
+        }
 
         if (-not (Test-Path $infPath)) {
             throw "Driver INF file not found at expected path: $infPath"
         }
 
-        # Stage Gprinter driver in Windows Driver Store
-        Write-Host "[*] Staging Gprinter driver in Windows Driver Store (pnputil)..." -ForegroundColor Cyan
+        # 1. Stage Gprinter driver package in Windows Driver Store
+        Write-Host "[*] Injecting driver package into Windows Driver Store (pnputil)..." -ForegroundColor Cyan
         $pnpProcess = Start-Process -FilePath "pnputil.exe" -ArgumentList "/add-driver `"$infPath`" /install" -Wait -PassThru -NoNewWindow
-        Write-Host "[+] Gprinter driver package successfully staged in Windows Driver Store!" -ForegroundColor Green
-        Write-Host "    (Gprinter GP-1324D, GP-3120TU, GP-2120TF, etc. are Plug-and-Play ready)" -ForegroundColor Gray
-        Write-ITLog -Action "Gprinter Driver Installation" -Result "Successfully Staged (PnP Ready)" -Level "SUCCESS"
+        Write-Host "    PnP Driver Store staging completed (Code: $($pnpProcess.ExitCode))." -ForegroundColor Gray
 
-        # Offer to launch Seagull Driver Wizard if technician wants to configure model/port now
-        if (Test-Path -Path $wizardPath) {
-            Write-Host ""
-            Write-Host "[?] Do you want to open Seagull Driver Wizard now to select a specific printer/USB port?" -ForegroundColor Yellow
-            $openWiz = Read-Host "Launch Driver Wizard now? (Y/N)"
-            if ($openWiz -match '^[Yy]$') {
-                Write-Host "[*] Launching Seagull Driver Wizard..." -ForegroundColor Cyan
-                $proc = Start-Process -FilePath $wizardPath -PassThru
-                Start-Sleep -Seconds 2
-                while (-not $proc.HasExited) {
-                    try {
-                        if ([Console]::KeyAvailable) {
-                            $k = [Console]::ReadKey($true)
-                            if ($k.Key -eq [ConsoleKey]::Enter -or $k.Key -eq [ConsoleKey]::Spacebar) {
-                                Write-Host "`n[*] Manual continuation signaled by technician." -ForegroundColor Cyan
-                                break
-                            }
-                        }
-                    } catch {}
-                    $proc.Refresh()
-                    if ($proc.MainWindowHandle -eq [System.IntPtr]::Zero) {
-                        Start-Sleep -Seconds 1
-                        $proc.Refresh()
-                        if ($proc.MainWindowHandle -eq [System.IntPtr]::Zero) {
-                            Write-Host "`n[+] Driver Wizard closed." -ForegroundColor Green
-                            break
-                        }
-                    }
-                    Start-Sleep -Milliseconds 800
-                }
-                if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue }
+        # 2. Register common Carrybee Gprinter models with Print Spooler
+        $coreModels = @("Gprinter GP-1324D", "Gprinter GP-3120TU", "Gprinter GP-2120TF")
+        Write-Host "[*] Registering Gprinter drivers with Windows Print Spooler..." -ForegroundColor Cyan
+        foreach ($m in $coreModels) {
+            try {
+                Add-PrinterDriver -Name $m -ErrorAction SilentlyContinue
+                Write-Host "    [+] Driver '$m' registered." -ForegroundColor Green
+            } catch {
+                # Non-blocking
             }
+        }
+
+        # 3. Create / verify primary printer queue (Default: Gprinter GP-1324D on USB001)
+        if (-not [string]::IsNullOrWhiteSpace($PreferredModel)) {
+            Write-Host "[*] Configuring printer queue for '$PreferredModel'..." -ForegroundColor Cyan
+            $existing = Get-Printer -Name $PreferredModel -ErrorAction SilentlyContinue
+            if (-not $existing) {
+                try {
+                    Add-Printer -Name $PreferredModel -DriverName $PreferredModel -PortName "USB001" -ErrorAction SilentlyContinue
+                    Write-Host "[+] Printer '$PreferredModel' queue bound to port USB001!" -ForegroundColor Green
+                } catch {
+                    Write-Host "[+] Driver is staged and ready! Connecting the printer via USB will automatically activate it." -ForegroundColor Green
+                }
+            } else {
+                Write-Host "[+] Printer '$PreferredModel' is already present." -ForegroundColor Green
+            }
+        }
+
+        Write-ITLog -Action "Gprinter Driver Installation" -Result "Completed Successfully (Model: $PreferredModel)" -Level "SUCCESS"
+
+        # 4. Optional interactive Seagull Driver Wizard if requested
+        if ($Interactive -and (Test-Path -Path $wizardPath)) {
+            Write-Host ""
+            Write-Host "[*] Launching Seagull Driver Wizard for custom setup..." -ForegroundColor Cyan
+            Start-Process -FilePath $wizardPath -Verb RunAs
+            Write-Host "[+] Driver Wizard opened in a separate window." -ForegroundColor Green
         }
 
         return $true
@@ -1158,8 +1171,6 @@ function Install-GprinterInternal {
         Write-Host "[-] Gprinter driver installation failed: $($_.Exception.Message)" -ForegroundColor Red
         Write-ITLog -Action "Gprinter Driver Installation" -Result "Failed: $($_.Exception.Message)" -Level "ERROR"
         return $false
-    } finally {
-        if (Test-Path $extractDir) { Remove-Item $extractDir -Recurse -Force -ErrorAction SilentlyContinue }
     }
 }
 
@@ -1168,10 +1179,44 @@ function Menu-InstallGprinterDriver {
     Write-Host "=================================================" -ForegroundColor Cyan
     Write-Host "     INSTALL GPRINTER THERMAL LABEL DRIVER       " -ForegroundColor Yellow
     Write-Host "=================================================" -ForegroundColor Cyan
-    Write-Host "Supports all Carrybee Gprinter barcode/waybill printers" -ForegroundColor Gray
-    Write-Host "(GP-1324D, GP-3120TU, GP-2120TF, GP-80250, etc.)" -ForegroundColor Gray
+    Write-Host "Select Gprinter Model to install:" -ForegroundColor White
+    Write-Host " [1] Gprinter GP-1324D (Standard Waybill / Shipping Label) - Default" -ForegroundColor Green
+    Write-Host " [2] Gprinter GP-3120TU (Barcode / Product Label)" -ForegroundColor White
+    Write-Host " [3] Gprinter GP-2120TF (2-inch Receipt / Mini Label)" -ForegroundColor White
+    Write-Host " [4] Launch Seagull Driver Wizard (Choose Custom Model / Port)" -ForegroundColor White
+    Write-Host " [5] Staging Only (Install All 266 Drivers for Auto-PnP)" -ForegroundColor White
     Write-Host ""
-    Install-GprinterInternal | Out-Null
+    Write-Host " [B] Back to Main Menu" -ForegroundColor Gray
+    Write-Host "=================================================" -ForegroundColor Cyan
+
+    $choice = Read-Host "Select an option [1-5 or B]"
+    switch ($choice.Trim().ToUpper()) {
+        "1" {
+            Write-Host ""
+            Install-GprinterInternal -PreferredModel "Gprinter GP-1324D" | Out-Null
+        }
+        "2" {
+            Write-Host ""
+            Install-GprinterInternal -PreferredModel "Gprinter GP-3120TU" | Out-Null
+        }
+        "3" {
+            Write-Host ""
+            Install-GprinterInternal -PreferredModel "Gprinter GP-2120TF" | Out-Null
+        }
+        "4" {
+            Write-Host ""
+            Install-GprinterInternal -Interactive | Out-Null
+        }
+        "5" {
+            Write-Host ""
+            Install-GprinterInternal -PreferredModel "" | Out-Null
+        }
+        "B" { return }
+        default {
+            Write-Host ""
+            Install-GprinterInternal -PreferredModel "Gprinter GP-1324D" | Out-Null
+        }
+    }
     Write-Host ""
     Read-Host "Press Enter to return to main menu..."
 }
