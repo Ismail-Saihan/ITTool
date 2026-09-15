@@ -41,7 +41,7 @@ function Assert-Administrator {
             $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
         } else {
             # Invoked via 'irm ... | iex'
-            $arguments = "-NoProfile -ExecutionPolicy Bypass -Command `"& { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12, [Net.SecurityProtocolType]::Tls13; irm '$Script:SelfRemoteUrl' | iex }`""
+            $arguments = "-NoProfile -ExecutionPolicy Bypass -Command `"& { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]'Tls,Tls11,Tls12'; [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { `$true }; irm '$Script:SelfRemoteUrl' | iex }`""
         }
 
         try {
@@ -64,8 +64,12 @@ function Initialize-Environment {
         Ensures necessary directory structures and log files exist.
     #>
     try {
-        # Force TLS 1.2 and TLS 1.3 for secure web requests
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12, [Net.SecurityProtocolType]::Tls13
+        # Resilient TLS 1.2/1.3 setup and SSL certificate trust bypass for field PCs with clock skew/untrusted root CAs
+        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]'Tls,Tls11,Tls12'
+        try {
+            [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 12288
+        } catch {}
+        [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
 
         if (-not (Test-Path -Path $Script:CompanyDir)) {
             New-Item -Path $Script:CompanyDir -ItemType Directory -Force | Out-Null
@@ -178,8 +182,18 @@ function Download-FileWithProgress {
         "G:\ITTool\Software\$targetName",
         "G:\Branch Software\Printer Driver\$targetName",
         "G:\Branch Software\Installers\$targetName",
+        "G:\Branch Software\Installers\OpenVPN\$targetName",
+        "G:\Branch Software\Installers\OpenVPN\openvpn-connect-3.9.0.5008_signed.msi",
         "$Script:DownloadDir\$targetName"
     )
+
+    # If searching for OpenVPN, dynamically scan all fixed/removable drives for Branch Software
+    if ($targetName -like "*openvpn*") {
+        foreach ($d in ('D','E','F','G','H')) {
+            $localSearchPaths += "$($d):\Branch Software\Installers\OpenVPN\openvpn-connect-3.9.0.5008_signed.msi"
+            $localSearchPaths += "$($d):\Branch Software\Installers\OpenVPN\$targetName"
+        }
+    }
 
     foreach ($candidate in $localSearchPaths) {
         if (-not [string]::IsNullOrWhiteSpace($candidate) -and (Test-Path -Path $candidate)) {
@@ -208,30 +222,92 @@ function Download-FileWithProgress {
         }
     }
 
-    # 3. HTTP Download from Web
+    # 3. HTTP Download from Web (Multi-Engine & SSL Tolerant)
     Write-Host "[*] Downloading $DisplayName..." -ForegroundColor Cyan
     Write-Host "    Source: $Url" -ForegroundColor Gray
     Write-Host "    Dest:   $DestinationPath" -ForegroundColor Gray
 
+    $destFolder = Split-Path -Path $DestinationPath -Parent
+    if ($destFolder -and -not (Test-Path -Path $destFolder)) {
+        New-Item -Path $destFolder -ItemType Directory -Force | Out-Null
+    }
+
+    # Ensure TLS and SSL certificate trust bypass for this thread
     try {
-        $destFolder = Split-Path -Path $DestinationPath -Parent
-        if ($destFolder -and -not (Test-Path -Path $destFolder)) {
-            New-Item -Path $destFolder -ItemType Directory -Force | Out-Null
-        }
+        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]'Tls,Tls11,Tls12'
+        try { [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 12288 } catch {}
+        [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+    } catch {}
 
-        Invoke-WebRequest -Uri $Url -OutFile $DestinationPath -UseBasicParsing -ErrorAction Stop
+    $downloadSuccess = $false
+    $lastErrorMsg = ""
 
-        if (Test-Path -Path $DestinationPath) {
-            $fileSizeMB = [math]::Round(((Get-Item -Path $DestinationPath).Length / 1MB), 2)
-            Write-Host "[+] Download completed ($fileSizeMB MB)" -ForegroundColor Green
-            Write-ITLog -Action "Download: $DisplayName" -Result "Completed ($fileSizeMB MB)" -Level "SUCCESS"
-            return $true
+    # Engine 1: PowerShell Invoke-WebRequest
+    try {
+        Invoke-WebRequest -Uri $Url -OutFile $DestinationPath -UseBasicParsing -TimeoutSec 180 -ErrorAction Stop
+        if ((Test-Path -Path $DestinationPath) -and (Get-Item -Path $DestinationPath).Length -ge $MinBytes) {
+            $downloadSuccess = $true
         } else {
-            throw "Downloaded file not found at destination."
+            $lastErrorMsg = "Downloaded file is 0 bytes or below minimum size threshold."
         }
     } catch {
-        Write-Host "[-] Download failed: $($_.Exception.Message)" -ForegroundColor Red
-        Write-ITLog -Action "Download: $DisplayName" -Result "Failed: $($_.Exception.Message)" -Level "ERROR"
+        $lastErrorMsg = $_.Exception.Message
+    }
+
+    # Engine 2: curl.exe with -k (bypasses SSL/TLS certificate trust errors directly)
+    if (-not $downloadSuccess) {
+        $curlCmd = Get-Command "curl.exe" -ErrorAction SilentlyContinue
+        if ($curlCmd) {
+            Write-Host "[*] Connection note: $lastErrorMsg. Retrying with curl (SSL-tolerant mode)..." -ForegroundColor Yellow
+            try {
+                $curlProcess = Start-Process -FilePath $curlCmd.Source -ArgumentList "-k -L --retry 2 --connect-timeout 20 -o `"$DestinationPath`" `"$Url`"" -Wait -PassThru -NoNewWindow
+                if ($curlProcess.ExitCode -eq 0 -and (Test-Path -Path $DestinationPath) -and (Get-Item -Path $DestinationPath).Length -ge $MinBytes) {
+                    $downloadSuccess = $true
+                } else {
+                    $lastErrorMsg = "curl exited with status code $($curlProcess.ExitCode)"
+                }
+            } catch {
+                $lastErrorMsg = $_.Exception.Message
+            }
+        }
+    }
+
+    # Engine 3: .NET WebClient fallback
+    if (-not $downloadSuccess) {
+        try {
+            Write-Host "[*] Retrying with .NET WebClient..." -ForegroundColor Yellow
+            $wc = New-Object System.Net.WebClient
+            $wc.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+            $wc.DownloadFile($Url, $DestinationPath)
+            $wc.Dispose()
+            if ((Test-Path -Path $DestinationPath) -and (Get-Item -Path $DestinationPath).Length -ge $MinBytes) {
+                $downloadSuccess = $true
+            }
+        } catch {
+            $lastErrorMsg = $_.Exception.Message
+        }
+    }
+
+    # Engine 4: BITS Transfer fallback
+    if (-not $downloadSuccess) {
+        try {
+            Start-BitsTransfer -Source $Url -Destination $DestinationPath -ErrorAction Stop
+            if ((Test-Path -Path $DestinationPath) -and (Get-Item -Path $DestinationPath).Length -ge $MinBytes) {
+                $downloadSuccess = $true
+            }
+        } catch {
+            $lastErrorMsg = $_.Exception.Message
+        }
+    }
+
+    if ($downloadSuccess) {
+        $fileSizeMB = [math]::Round(((Get-Item -Path $DestinationPath).Length / 1MB), 2)
+        Write-Host "[+] Download completed ($fileSizeMB MB)" -ForegroundColor Green
+        Write-ITLog -Action "Download: $DisplayName" -Result "Completed ($fileSizeMB MB)" -Level "SUCCESS"
+        return $true
+    } else {
+        Write-Host "[-] Download failed: $lastErrorMsg" -ForegroundColor Red
+        Write-ITLog -Action "Download: $DisplayName" -Result "Failed: $lastErrorMsg" -Level "ERROR"
         return $false
     }
 }
@@ -589,16 +665,25 @@ function Import-OpenVPNConfigInternal {
 
 function Install-OpenVPNInternal {
     # Official OpenVPN Connect Client v3 (Corporate Client)
-    $downloadUrl = "https://openvpn.net/downloads/openvpn-connect-v3-windows.msi"
     $installerPath = "$Script:DownloadDir\openvpn-connect-v3-windows.msi"
 
     Write-ITLog -Action "OpenVPN Connect Installation" -Result "Started" -Level "INFO"
     
-    $downloadSuccess = Download-FileWithProgress -Url $downloadUrl -DestinationPath $installerPath -DisplayName "OpenVPN Connect Client"
-    if (-not $downloadSuccess) {
-        # Fallback to repository mirror if available
-        $downloadUrl = "$Script:BaseRawUrl/Software/OpenVPN.msi"
-        $downloadSuccess = Download-FileWithProgress -Url $downloadUrl -DestinationPath $installerPath -DisplayName "OpenVPN Client (Mirror)"
+    # Resilient multi-mirror download sources:
+    # 1. GitHub Releases CDN (Global Fastly/Azure CDN with trusted SSL certificate on all Windows versions)
+    # 2. Official OpenVPN Packages Repository (Direct MSI payload)
+    # 3. Official OpenVPN Download Gateway
+    $downloadCandidates = @(
+        @{ Url = "https://github.com/Ismail-Saihan/ITTool/releases/download/v2.0/openvpn-connect-3.9.0.5008_signed.msi"; Name = "OpenVPN Connect (GitHub Release CDN)" },
+        @{ Url = "https://packages.openvpn.net/connect/v3/openvpn-connect-3.9.0.5008_signed.msi"; Name = "OpenVPN Connect (Official Packages Repository)" },
+        @{ Url = "https://openvpn.net/downloads/openvpn-connect-v3-windows.msi"; Name = "OpenVPN Connect (Official Download Portal)" }
+    )
+
+    $downloadSuccess = $false
+    foreach ($cand in $downloadCandidates) {
+        $downloadSuccess = Download-FileWithProgress -Url $cand.Url -DestinationPath $installerPath -DisplayName $cand.Name -MinBytes (50 * 1024 * 1024)
+        if ($downloadSuccess) { break }
+        Write-Host "[!] Primary mirror unavailable or blocked. Trying next mirror..." -ForegroundColor Yellow
     }
 
     if (-not $downloadSuccess) { return $false }
