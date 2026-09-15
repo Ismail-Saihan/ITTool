@@ -183,12 +183,12 @@ function Download-FileWithProgress {
         "G:\Branch Software\Printer Driver\$targetName",
         "G:\Branch Software\Installers\$targetName",
         "G:\Branch Software\Installers\OpenVPN\$targetName",
-        "G:\Branch Software\Installers\OpenVPN\openvpn-connect-3.9.0.5008_signed.msi",
         "$Script:DownloadDir\$targetName"
     )
 
     # If searching for OpenVPN, dynamically scan all fixed/removable drives for Branch Software
     if ($targetName -like "*openvpn*") {
+        $localSearchPaths += "G:\Branch Software\Installers\OpenVPN\openvpn-connect-3.9.0.5008_signed.msi"
         foreach ($d in ('D','E','F','G','H')) {
             $localSearchPaths += "$($d):\Branch Software\Installers\OpenVPN\openvpn-connect-3.9.0.5008_signed.msi"
             $localSearchPaths += "$($d):\Branch Software\Installers\OpenVPN\$targetName"
@@ -1445,12 +1445,32 @@ function Generate-AssetQRCodeInternal {
     $imageFile   = "$desktopPath\Asset Information.png"
     $textFile    = "$desktopPath\Asset Information.txt"
 
+    # Clean up any stale or corrupted image file first
+    if (Test-Path -Path $imageFile) {
+        Remove-Item -Path $imageFile -Force -ErrorAction SilentlyContinue
+    }
+
     # Save exact text string to desktop file
     try {
         $assetString | Out-File -FilePath $textFile -Encoding utf8 -Force
         Write-Host "[+] Saved text record: $textFile" -ForegroundColor Green
     } catch {
         Write-Host "[!] Could not save text file: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+
+    # Helper function to validate if a file is a valid PNG image
+    $script:TestPngValid = {
+        param([string]$path)
+        if (-not (Test-Path -Path $path)) { return $false }
+        try {
+            $fInfo = Get-Item -Path $path -ErrorAction Stop
+            if ($fInfo.Length -lt 100) { return $false }
+            $header = [System.IO.File]::ReadAllBytes($path)
+            if ($header.Length -ge 8 -and $header[0] -eq 137 -and $header[1] -eq 80 -and $header[2] -eq 78 -and $header[3] -eq 71) {
+                return $true
+            }
+        } catch {}
+        return $false
     }
 
     # Fetch QR Code Image via API (400x400 PNG)
@@ -1463,11 +1483,28 @@ function Generate-AssetQRCodeInternal {
 
     $downloadSuccess = $false
     foreach ($url in $qrUrls) {
-        $downloadSuccess = Download-FileWithProgress -Url $url -DestinationPath $imageFile -DisplayName "Asset QR Code Image" -Force
-        if ($downloadSuccess) { break }
+        # Attempt 1: Multi-engine download helper with low minimum size threshold for PNGs
+        $dlOk = Download-FileWithProgress -Url $url -DestinationPath $imageFile -DisplayName "Asset QR Code Image" -MinBytes 100 -Force
+        if ($dlOk -and (& $script:TestPngValid $imageFile)) {
+            $downloadSuccess = $true
+            break
+        }
+
+        # Attempt 2: Direct curl.exe with SSL trust bypass if Download-FileWithProgress did not yield valid PNG
+        $curlCmd = Get-Command "curl.exe" -ErrorAction SilentlyContinue
+        if ($curlCmd) {
+            try {
+                if (Test-Path -Path $imageFile) { Remove-Item -Path $imageFile -Force -ErrorAction SilentlyContinue }
+                $p = Start-Process -FilePath $curlCmd.Source -ArgumentList "-k -s -L `"$url`" -o `"$imageFile`"" -Wait -PassThru -NoNewWindow
+                if ($p.ExitCode -eq 0 -and (& $script:TestPngValid $imageFile)) {
+                    $downloadSuccess = $true
+                    break
+                }
+            } catch {}
+        }
     }
 
-    if ($downloadSuccess -and (Test-Path -Path $imageFile)) {
+    if ($downloadSuccess -and (& $script:TestPngValid $imageFile)) {
         Write-Host ""
         Write-Host "[+] Asset QR Code successfully created on Desktop!" -ForegroundColor Green
         Write-Host "    File: $imageFile" -ForegroundColor Yellow
@@ -1609,12 +1646,11 @@ function Menu-ShowDeviceInformation {
         Write-Host " [1]  View Full System Specifications & Status   " -ForegroundColor White
         Write-Host " [2]  Generate Asset QR Code on Desktop          " -ForegroundColor Green
         Write-Host " [3]  Rename Computer (e.g. CBE-IT-LAPTOP-0633)  " -ForegroundColor White
-        Write-Host " [4]  Export Complete PC Inventory Report (.txt) " -ForegroundColor White
         Write-Host ""
         Write-Host " [B]  Back to Main Menu                          " -ForegroundColor Gray
         Write-Host "=================================================" -ForegroundColor Cyan
 
-        $subChoice = Read-Host "Select an option [1-4 or B]"
+        $subChoice = Read-Host "Select an option [1-3 or B]"
         switch ($subChoice.Trim().ToUpper()) {
             "1" {
                 Show-DeviceSpecificationsInternal
@@ -1628,11 +1664,6 @@ function Menu-ShowDeviceInformation {
             }
             "3" {
                 Rename-ComputerInteractive
-                Write-Host ""
-                Read-Host "Press Enter to continue..."
-            }
-            "4" {
-                Export-PCReportInternal | Out-Null
                 Write-Host ""
                 Read-Host "Press Enter to continue..."
             }
@@ -1917,16 +1948,6 @@ function Export-PCReportInternal {
     }
 }
 
-function Menu-ExportReport {
-    Clear-Host
-    Write-Host "=================================================" -ForegroundColor Cyan
-    Write-Host "         EXPORT PC INVENTORY REPORT              " -ForegroundColor Yellow
-    Write-Host "=================================================" -ForegroundColor Cyan
-    Export-PCReportInternal | Out-Null
-    Write-Host ""
-    Read-Host "Press Enter to return to main menu..."
-}
-
 # ==============================================================================
 # [0] FAST ONBOARD: RUN COMPLETE PROVISIONING BUNDLE (ALL-IN-ONE)
 # ==============================================================================
@@ -2032,12 +2053,11 @@ function Show-MainMenu {
         Write-Host " [10] Network Diagnostics & Health Suite         " -ForegroundColor White
         Write-Host " [11] Windows OS Repair & Cleanup (SFC/DISM/Temp)" -ForegroundColor White
         Write-Host " [12] Windows Debloat & Performance Tweaks       " -ForegroundColor White
-        Write-Host " [13] Export PC Inventory Report                 " -ForegroundColor White
         Write-Host ""
         Write-Host " [X]  Exit                                       " -ForegroundColor Red
         Write-Host "=================================================" -ForegroundColor Cyan
         
-        $selection = Read-Host "Select an option [0-13 or X]"
+        $selection = Read-Host "Select an option [0-12 or X]"
 
         switch ($selection.Trim().ToUpper()) {
             "0"  { Menu-FastOnboardAll }
@@ -2053,7 +2073,6 @@ function Show-MainMenu {
             "10" { Menu-NetworkDiagnostics }
             "11" { Menu-SystemRepairAndCleanup }
             "12" { Menu-WindowsTweaks }
-            "13" { Menu-ExportReport }
             "X"  {
                 Write-Host "`n[*] Exiting Carrybee IT Tool. Goodbye!" -ForegroundColor Cyan
                 Write-ITLog -Action "Session Terminated" -Result "User exited menu" -Level "INFO"
