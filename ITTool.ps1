@@ -1313,9 +1313,247 @@ function Menu-DeployPrintServer {
 }
 
 # ==============================================================================
-# [9] DEVICE INFORMATION & RENAME
+# [9] DEVICE INFORMATION & ASSET MANAGEMENT SUITE
 # ==============================================================================
-function Menu-ShowDeviceInformation {
+function Get-AssetInformationString {
+    <#
+    .SYNOPSIS
+        Generates formatted asset inventory string for QR code and label printing:
+        Format: "i5 11th Gen, RAM 16GB, SSD 512 GB, 14-inch, SN# 5CD124NJSM, BSN# 5CD124NJSM"
+    #>
+    # 1. CPU Short Branding
+    $cpuRaw = ""
+    try {
+        $cpuRaw = (Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue | Select-Object -First 1).Name.Trim()
+    } catch {}
+
+    $cpuShort = "CPU"
+    if ($cpuRaw -match '(?i)(i[3579])-(\d{4,5}[A-Z\d]*)') {
+        $tier = $Matches[1].ToLower()
+        $numPart = $Matches[2]
+        $genNum = if ($numPart -match '^1[0-9]') { $numPart.Substring(0, 2) } elseif ($numPart -match '^[2-9]') { $numPart.Substring(0, 1) } else { "" }
+        if ($genNum) {
+            $suffix = switch ($genNum) { "1" { "1st" }; "2" { "2nd" }; "3" { "3rd" }; default { "${genNum}th" } }
+            $cpuShort = "$tier $suffix Gen"
+        } else {
+            $cpuShort = $tier
+        }
+    } elseif ($cpuRaw -match '(?i)(\d{1,2})th Gen.*?(i[3579])') {
+        $cpuShort = "$($Matches[2].ToLower()) $($Matches[1])th Gen"
+    } elseif ($cpuRaw -match 'Ryzen \d \d{4}') {
+        $cpuShort = $Matches[0]
+    } elseif ($cpuRaw) {
+        $cpuShort = ($cpuRaw -replace '(?i)Intel\(R\)\s*Core\(TM\)\s*', '' -replace '(?i)@.*', '').Trim()
+    }
+
+    # 2. RAM (GB)
+    $ramStr = "RAM 8GB"
+    try {
+        $totalRamBytes = (Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).TotalPhysicalMemory
+        if ($totalRamBytes -gt 0) {
+            $ramGB = [math]::Round($totalRamBytes / 1GB)
+            $ramStr = "RAM ${ramGB}GB"
+        }
+    } catch {}
+
+    # 3. SSD / Storage
+    $diskStr = "SSD 512 GB"
+    try {
+        $pDisks = Get-PhysicalDisk -ErrorAction SilentlyContinue
+        $targetDisk = $pDisks | Where-Object { $_.MediaType -eq 'SSD' } | Select-Object -First 1
+        if (-not $targetDisk) { $targetDisk = $pDisks | Select-Object -First 1 }
+        
+        $rawGB = 0
+        $dType = "SSD"
+        if ($targetDisk) {
+            $rawGB = [math]::Round($targetDisk.Size / 1GB)
+            if ($targetDisk.MediaType) { $dType = $targetDisk.MediaType }
+        } else {
+            $cDrive = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'" -ErrorAction SilentlyContinue
+            if ($cDrive) { $rawGB = [math]::Round($cDrive.Size / 1GB) }
+        }
+
+        # Match to standard storage capacities (128, 256, 512, 1024/1TB, 2048/2TB)
+        $stdSizes = @(128, 256, 512, 1024, 2048)
+        $roundedSize = $rawGB
+        foreach ($sz in $stdSizes) {
+            if ([math]::Abs($rawGB - $sz) -le ($sz * 0.15)) {
+                $roundedSize = $sz
+                break
+            }
+        }
+
+        if ($roundedSize -ge 1024) {
+            $diskStr = "$dType $([math]::Round($roundedSize / 1024)) TB"
+        } else {
+            $diskStr = "$dType $roundedSize GB"
+        }
+    } catch {}
+
+    # 4. Screen Size
+    $screenStr = "14-inch"
+    try {
+        $mon = Get-CimInstance -Namespace root\wmi -ClassName WmiMonitorBasicDisplayParams -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($mon -and $mon.MaxHorizontalImageSize -gt 0 -and $mon.MaxVerticalImageSize -gt 0) {
+            $diagCm = [math]::Sqrt([math]::Pow($mon.MaxHorizontalImageSize, 2) + [math]::Pow($mon.MaxVerticalImageSize, 2))
+            $diagInches = [math]::Round(($diagCm / 2.54), 1)
+            if ($diagInches -ge 13.5 -and $diagInches -le 14.5) {
+                $screenStr = "14-inch"
+            } elseif ($diagInches -ge 15.0 -and $diagInches -le 16.0) {
+                $screenStr = "15.6-inch"
+            } elseif ($diagInches -ge 13.0 -and $diagInches -le 13.5) {
+                $screenStr = "13.3-inch"
+            } else {
+                $screenStr = "$([math]::Round($diagInches))-inch"
+            }
+        }
+    } catch {}
+
+    # 5. Serial Numbers (SN# and BSN#)
+    $bsn = "N/A"
+    $sn = "N/A"
+    try {
+        $bios = Get-CimInstance Win32_BIOS -ErrorAction SilentlyContinue
+        if ($bios -and $bios.SerialNumber) { $bsn = $bios.SerialNumber.Trim() }
+    } catch {}
+    try {
+        $csp = Get-CimInstance Win32_ComputerSystemProduct -ErrorAction SilentlyContinue
+        if ($csp -and $csp.IdentifyingNumber) { $sn = $csp.IdentifyingNumber.Trim() }
+    } catch {}
+    if ($sn -eq "N/A" -or [string]::IsNullOrWhiteSpace($sn)) { $sn = $bsn }
+    if ($bsn -eq "N/A" -or [string]::IsNullOrWhiteSpace($bsn)) { $bsn = $sn }
+
+    return "$cpuShort, $ramStr, $diskStr, $screenStr, SN# $sn, BSN# $bsn"
+}
+
+function Generate-AssetQRCodeInternal {
+    <#
+    .SYNOPSIS
+        Generates and saves the QR Code image named "Asset Information.png" and "Asset Information.txt" on Desktop.
+    #>
+    Write-Host "`n[*] Generating Carrybee Asset Information..." -ForegroundColor Cyan
+    $assetString = Get-AssetInformationString
+
+    Write-Host ""
+    Write-Host "============================================================" -ForegroundColor Green
+    Write-Host "                  ASSET INFORMATION                         " -ForegroundColor Yellow
+    Write-Host "============================================================" -ForegroundColor Green
+    Write-Host "Payload: " -NoNewline; Write-Host $assetString -ForegroundColor White
+    Write-Host "============================================================" -ForegroundColor Green
+
+    $desktopPath = [Environment]::GetFolderPath("Desktop")
+    $imageFile   = "$desktopPath\Asset Information.png"
+    $textFile    = "$desktopPath\Asset Information.txt"
+
+    # Save exact text string to desktop file
+    try {
+        $assetString | Out-File -FilePath $textFile -Encoding utf8 -Force
+        Write-Host "[+] Saved text record: $textFile" -ForegroundColor Green
+    } catch {
+        Write-Host "[!] Could not save text file: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+
+    # Fetch QR Code Image via API (400x400 PNG)
+    Write-Host "[*] Generating QR Code image on Desktop..." -ForegroundColor Cyan
+    $encodedPayload = [System.Uri]::EscapeDataString($assetString)
+    $qrUrls = @(
+        "https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=$encodedPayload",
+        "https://quickchart.io/qr?size=400&text=$encodedPayload"
+    )
+
+    $downloadSuccess = $false
+    foreach ($url in $qrUrls) {
+        $downloadSuccess = Download-FileWithProgress -Url $url -DestinationPath $imageFile -DisplayName "Asset QR Code Image" -Force
+        if ($downloadSuccess) { break }
+    }
+
+    if ($downloadSuccess -and (Test-Path -Path $imageFile)) {
+        Write-Host ""
+        Write-Host "[+] Asset QR Code successfully created on Desktop!" -ForegroundColor Green
+        Write-Host "    File: $imageFile" -ForegroundColor Yellow
+        Write-ITLog -Action "Asset QR Code" -Result "Generated ($imageFile) - $assetString" -Level "SUCCESS"
+
+        # Open QR code image automatically for immediate viewing/scanning
+        try {
+            Start-Process -FilePath $imageFile -ErrorAction SilentlyContinue
+        } catch {}
+        return $imageFile
+    } else {
+        Write-Host "[-] Could not download QR Code image from web." -ForegroundColor Yellow
+        Write-Host "    The text file '$textFile' has been created on your Desktop." -ForegroundColor Green
+        Write-ITLog -Action "Asset QR Code" -Result "Text created, image download failed" -Level "WARNING"
+        return $null
+    }
+}
+
+function Rename-ComputerInteractive {
+    Write-Host ""
+    Write-Host "=================================================" -ForegroundColor Cyan
+    Write-Host "                 RENAME COMPUTER                 " -ForegroundColor Yellow
+    Write-Host "=================================================" -ForegroundColor Cyan
+    Write-Host "Current Computer Name: " -NoNewline; Write-Host $env:COMPUTERNAME -ForegroundColor Green
+    Write-Host ""
+    
+    $newName = (Read-Host "Enter new computer name (e.g. CBE-IT-LAPTOP-0633, max 63 characters)").Trim()
+    if ([string]::IsNullOrWhiteSpace($newName)) {
+        Write-Host "[-] Operation cancelled. No name entered." -ForegroundColor Yellow
+        return
+    }
+
+    # Windows / RFC 1123 Hostname Validation Rules (same as Windows Settings):
+    # 1. Length between 1 and 63 characters
+    # 2. Allowed characters: letters (A-Z, a-z), numbers (0-9), and hyphens (-)
+    # 3. Cannot start or end with a hyphen
+    # 4. Cannot consist entirely of numbers
+    $isValidFormat = $newName -match '^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?$'
+    $isNotAllNumbers = $newName -match '[a-zA-Z]'
+
+    if ($newName.Length -gt 63 -or -not $isValidFormat -or -not $isNotAllNumbers) {
+        Write-Host "[-] Invalid computer name." -ForegroundColor Red
+        Write-Host "    Rules: 1-63 characters, letters, numbers, and hyphens (-) allowed." -ForegroundColor Yellow
+        Write-Host "    Cannot start/end with a hyphen and cannot contain spaces or special symbols." -ForegroundColor Yellow
+        return
+    }
+
+    try {
+        $renamed = $false
+        # Method 1: PowerShell Rename-Computer cmdlet
+        try {
+            Rename-Computer -NewName $newName -Force -WarningAction SilentlyContinue -ErrorAction Stop
+            $renamed = $true
+        } catch {
+            # Method 2: WMI/CIM fallback
+            $csObj = Get-CimInstance -ClassName Win32_ComputerSystem
+            $wmiResult = Invoke-CimMethod -InputObject $csObj -MethodName Rename -Arguments @{ Name = $newName } -ErrorAction Stop
+            if ($wmiResult.ReturnValue -eq 0) {
+                $renamed = $true
+            } else {
+                throw "WMI Rename returned error code $($wmiResult.ReturnValue)"
+            }
+        }
+
+        if ($renamed) {
+            Write-Host "[+] Computer successfully renamed to '$newName'!" -ForegroundColor Green
+            if ($newName.Length -gt 15) {
+                $netBiosName = $newName.Substring(0, 15)
+                Write-Host "    Full Hostname: $newName | NetBIOS (Legacy): $netBiosName" -ForegroundColor Gray
+            }
+            Write-Host "[!] A RESTART IS REQUIRED for the change to take effect." -ForegroundColor Yellow
+            Write-ITLog -Action "Rename Computer" -Result "Renamed to $newName" -Level "SUCCESS"
+
+            $restartNow = Read-Host "`nDo you want to restart the computer now? (Y/N)"
+            if ($restartNow -match '^[Yy]$') {
+                Write-Host "[*] Restarting computer in 5 seconds..." -ForegroundColor Yellow
+                Restart-Computer -Force
+            }
+        }
+    } catch {
+        Write-Host "[-] Failed to rename computer: $($_.Exception.Message)" -ForegroundColor Red
+        Write-ITLog -Action "Rename Computer" -Result "Failed: $($_.Exception.Message)" -Level "ERROR"
+    }
+}
+
+function Show-DeviceSpecificationsInternal {
     Clear-Host
     Write-Host "=================================================" -ForegroundColor Cyan
     Write-Host "              DEVICE INFORMATION                 " -ForegroundColor Yellow
@@ -1326,6 +1564,7 @@ function Menu-ShowDeviceInformation {
         $cs      = Get-CimInstance -ClassName Win32_ComputerSystem
         $os      = Get-CimInstance -ClassName Win32_OperatingSystem
         $bios    = Get-CimInstance -ClassName Win32_BIOS
+        $csp     = Get-CimInstance -ClassName Win32_ComputerSystemProduct -ErrorAction SilentlyContinue
         $cpu     = Get-CimInstance -ClassName Win32_Processor | Select-Object -First 1
         $ramGB   = [math]::Round(($cs.TotalPhysicalMemory / 1GB), 2)
         
@@ -1335,9 +1574,11 @@ function Menu-ShowDeviceInformation {
 
         $displayIp = if ($ipList) { $ipList } else { "N/A" }
         $displayMac = if ($macList) { $macList } else { "N/A" }
+        $sysSerial = if ($csp -and $csp.IdentifyingNumber) { $csp.IdentifyingNumber } else { $bios.SerialNumber }
 
         Write-Host "Computer Name:       " -NoNewline; Write-Host $env:COMPUTERNAME -ForegroundColor Green
-        Write-Host "BIOS Serial Number:  " -NoNewline; Write-Host $bios.SerialNumber -ForegroundColor Green
+        Write-Host "System Serial (SN):  " -NoNewline; Write-Host $sysSerial -ForegroundColor Green
+        Write-Host "BIOS Serial (BSN):   " -NoNewline; Write-Host $bios.SerialNumber -ForegroundColor Green
         Write-Host "Manufacturer:        " -NoNewline; Write-Host $cs.Manufacturer -ForegroundColor White
         Write-Host "Model:               " -NoNewline; Write-Host $cs.Model -ForegroundColor White
         Write-Host "CPU:                 " -NoNewline; Write-Host $cpu.Name.Trim() -ForegroundColor White
@@ -1348,71 +1589,60 @@ function Menu-ShowDeviceInformation {
         Write-Host "IP Address:          " -NoNewline; Write-Host $displayIp -ForegroundColor Yellow
         Write-Host "MAC Address:         " -NoNewline; Write-Host $displayMac -ForegroundColor Yellow
         Write-Host "=================================================" -ForegroundColor Cyan
+        
+        $assetStr = Get-AssetInformationString
+        Write-Host "Asset Summary:       " -NoNewline; Write-Host $assetStr -ForegroundColor Cyan
+        Write-Host "=================================================" -ForegroundColor Cyan
 
         Write-ITLog -Action "Query Device Information" -Result "Success (Host: $env:COMPUTERNAME)" -Level "INFO"
-
-        Write-Host ""
-        $renameChoice = Read-Host "Do you want to change computer name? (Y/N)"
-        if ($renameChoice -match '^[Yy]$') {
-            $newName = (Read-Host "Enter new computer name (e.g. CBE-IT-LAPTOP-0633, max 63 characters)").Trim()
-            
-            # Windows / RFC 1123 Hostname Validation Rules (same as Windows Settings):
-            # 1. Length between 1 and 63 characters
-            # 2. Allowed characters: letters (A-Z, a-z), numbers (0-9), and hyphens (-)
-            # 3. Cannot start or end with a hyphen
-            # 4. Cannot consist entirely of numbers
-            $isValidFormat = $newName -match '^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?$'
-            $isNotAllNumbers = $newName -match '[a-zA-Z]'
-
-            if ([string]::IsNullOrWhiteSpace($newName) -or $newName.Length -gt 63 -or -not $isValidFormat -or -not $isNotAllNumbers) {
-                Write-Host "[-] Invalid computer name." -ForegroundColor Red
-                Write-Host "    Rules: 1-63 characters, letters, numbers, and hyphens (-) allowed." -ForegroundColor Yellow
-                Write-Host "    Cannot start/end with a hyphen and cannot contain spaces or special symbols." -ForegroundColor Yellow
-            } else {
-                try {
-                    $renamed = $false
-                    # Method 1: PowerShell Rename-Computer cmdlet
-                    try {
-                        Rename-Computer -NewName $newName -Force -WarningAction SilentlyContinue -ErrorAction Stop
-                        $renamed = $true
-                    } catch {
-                        # Method 2: WMI/CIM fallback
-                        $csObj = Get-CimInstance -ClassName Win32_ComputerSystem
-                        $wmiResult = Invoke-CimMethod -InputObject $csObj -MethodName Rename -Arguments @{ Name = $newName } -ErrorAction Stop
-                        if ($wmiResult.ReturnValue -eq 0) {
-                            $renamed = $true
-                        } else {
-                            throw "WMI Rename returned error code $($wmiResult.ReturnValue)"
-                        }
-                    }
-
-                    if ($renamed) {
-                        Write-Host "[+] Computer successfully renamed to '$newName'!" -ForegroundColor Green
-                        if ($newName.Length -gt 15) {
-                            $netBiosName = $newName.Substring(0, 15)
-                            Write-Host "    Full Hostname: $newName | NetBIOS (Legacy): $netBiosName" -ForegroundColor Gray
-                        }
-                        Write-Host "[!] A RESTART IS REQUIRED for the change to take effect." -ForegroundColor Yellow
-                        Write-ITLog -Action "Rename Computer" -Result "Renamed to $newName" -Level "SUCCESS"
-
-                        $restartNow = Read-Host "`nDo you want to restart the computer now? (Y/N)"
-                        if ($restartNow -match '^[Yy]$') {
-                            Write-Host "[*] Restarting computer in 5 seconds..." -ForegroundColor Yellow
-                            Restart-Computer -Force
-                        }
-                    }
-                } catch {
-                    Write-Host "[-] Failed to rename computer: $($_.Exception.Message)" -ForegroundColor Red
-                    Write-ITLog -Action "Rename Computer" -Result "Failed: $($_.Exception.Message)" -Level "ERROR"
-                }
-            }
-        }
     } catch {
         Write-Host "[-] Failed to retrieve device info: $($_.Exception.Message)" -ForegroundColor Red
     }
+}
 
-    Write-Host ""
-    Read-Host "Press Enter to return to main menu..."
+function Menu-ShowDeviceInformation {
+    do {
+        Clear-Host
+        Write-Host "=================================================" -ForegroundColor Cyan
+        Write-Host "         DEVICE INFORMATION & ASSET SUITE        " -ForegroundColor Yellow
+        Write-Host "=================================================" -ForegroundColor Cyan
+        Write-Host " [1]  View Full System Specifications & Status   " -ForegroundColor White
+        Write-Host " [2]  Generate Asset QR Code on Desktop          " -ForegroundColor Green
+        Write-Host " [3]  Rename Computer (e.g. CBE-IT-LAPTOP-0633)  " -ForegroundColor White
+        Write-Host " [4]  Export Complete PC Inventory Report (.txt) " -ForegroundColor White
+        Write-Host ""
+        Write-Host " [B]  Back to Main Menu                          " -ForegroundColor Gray
+        Write-Host "=================================================" -ForegroundColor Cyan
+
+        $subChoice = Read-Host "Select an option [1-4 or B]"
+        switch ($subChoice.Trim().ToUpper()) {
+            "1" {
+                Show-DeviceSpecificationsInternal
+                Write-Host ""
+                Read-Host "Press Enter to continue..."
+            }
+            "2" {
+                Generate-AssetQRCodeInternal | Out-Null
+                Write-Host ""
+                Read-Host "Press Enter to continue..."
+            }
+            "3" {
+                Rename-ComputerInteractive
+                Write-Host ""
+                Read-Host "Press Enter to continue..."
+            }
+            "4" {
+                Export-PCReportInternal | Out-Null
+                Write-Host ""
+                Read-Host "Press Enter to continue..."
+            }
+            "B" { return }
+            default {
+                Write-Host "`n[-] Invalid selection. Returning to menu..." -ForegroundColor Yellow
+                Start-Sleep -Seconds 1
+            }
+        }
+    } while ($true)
 }
 
 # ==============================================================================
@@ -1741,8 +1971,9 @@ function Menu-FastOnboardAll {
     Write-Host "`n[STAGE 5/6] Applying Windows Optimization & NTP Clock Sync..." -ForegroundColor Magenta
     Optimize-WindowsPerformanceInternal
 
-    Write-Host "`n[STAGE 6/6] Generating Final Inventory Audit..." -ForegroundColor Magenta
+    Write-Host "`n[STAGE 6/6] Generating Final Inventory Audit & Asset QR Code..." -ForegroundColor Magenta
     $report = Export-PCReportInternal
+    $qrImage = Generate-AssetQRCodeInternal
 
     $stopwatch.Stop()
     $totalMinutes = [math]::Round($stopwatch.Elapsed.TotalMinutes, 2)
@@ -1752,6 +1983,7 @@ function Menu-FastOnboardAll {
     Write-Host "   COMPLETE PROVISIONING BUNDLE FINISHED IN $totalMinutes MINS!    " -ForegroundColor Yellow
     Write-Host "============================================================" -ForegroundColor Green
     if ($report) { Write-Host "Report created on Desktop: $report" -ForegroundColor Cyan }
+    if ($qrImage) { Write-Host "Asset QR Code created on Desktop: $qrImage" -ForegroundColor Cyan }
     Write-ITLog -Action "Fast Onboard" -Result "Completed in $totalMinutes minutes" -Level "SUCCESS"
 
     Write-Host ""
@@ -1796,7 +2028,7 @@ function Show-MainMenu {
         Write-Host " [8]  Deploy Print Server & Security Rules       " -ForegroundColor White
         Write-Host ""
         Write-Host " --- SYSTEM & NETWORK UTILITIES ---              " -ForegroundColor Gray
-        Write-Host " [9]  Device Information & Rename PC             " -ForegroundColor White
+        Write-Host " [9]  Device Information & Asset QR Code         " -ForegroundColor White
         Write-Host " [10] Network Diagnostics & Health Suite         " -ForegroundColor White
         Write-Host " [11] Windows OS Repair & Cleanup (SFC/DISM/Temp)" -ForegroundColor White
         Write-Host " [12] Windows Debloat & Performance Tweaks       " -ForegroundColor White

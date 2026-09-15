@@ -64,7 +64,7 @@ irm https://raw.githubusercontent.com/Ismail-Saihan/ITTool/main/ITTool.ps1 | iex
  [8]  Deploy Print Server & Security Rules       
 
  --- SYSTEM & NETWORK UTILITIES ---              
- [9]  Device Information & Rename PC             
+ [9]  Device Information & Asset QR Code         
  [10] Network Diagnostics & Health Suite         
  [11] Windows OS Repair & Cleanup (SFC/DISM/Temp)
  [12] Windows Debloat & Performance Tweaks       
@@ -75,7 +75,7 @@ irm https://raw.githubusercontent.com/Ismail-Saihan/ITTool/main/ITTool.ps1 | iex
 ```
 
 ### Feature Highlights:
-- **`[0] ⚡ RUN COMPLETE PROVISIONING BUNDLE`:** Single-click sequential execution of all software installers, printer drivers, Defender exclusions, performance tweaks, and automated audit report generation in minutes.
+- **`[0] ⚡ RUN COMPLETE PROVISIONING BUNDLE`:** Single-click sequential execution of all software installers, printer drivers, Defender exclusions, performance tweaks, automated audit report generation, and Asset QR code generation in minutes.
 - **Smart Download Caching (`Test-FileAlreadyDownloaded`):** Automatically checks `C:\CompanyTools\Downloads` before downloading. If a valid binary is already present, it skips downloading to save bandwidth. Also scans local USB drives/offline media before falling back to GitHub.
 - **`[1] Web Browsers`:** Silent unattended installation of Google Chrome Enterprise and Mozilla Firefox x64.
 - **`[2] VoIP & VPN Auto-Import`:** Installs MicroSIP configured to run in Administrator mode by default (via machine-wide & user-level AppCompatFlags and shortcut elevation), deploys official OpenVPN Connect v3 Client (or standard OpenVPN), and auto-imports `Carrybee-IPTSP-BOL.ovpn`.
@@ -83,9 +83,13 @@ irm https://raw.githubusercontent.com/Ismail-Saihan/ITTool/main/ITTool.ps1 | iex
 - **`[4] DotMAX Printer Driver`:** Interactive driver setup with automatic window monitoring, graceful timeout, and zombie process cleanup.
 - **`[5] Canon LBP6030/6018 Driver`:** Fully automated Plug-and-Play driver injection into the Windows Driver Store (`pnputil`), spooler registration, and USB port pre-binding.
 - **`[6] HP LaserJet Pro M12a Driver`:** Automated Plug-and-Play driver injection into the Windows Driver Store (`pnputil`) using clean INF package (3.3 MB vs 112 MB bloatware installer).
-- **`[7] Gprinter Thermal Label Driver`:** Seagull Scientific driver package for TSC/TSPL label & barcode printing with automated PnP staging and Driver Wizard assistance.
+- **`[7] Gprinter Thermal Label Driver`:** Seagull Scientific driver package for TSC/TSPL label & barcode printing with automated PnP staging, spooler registration for GP-1324D / GP-3120TU / GP-2120TF, and Driver Wizard assistance.
 - **`[8] Print Server Deployment`:** Deploys `PrintServer.exe` to `C:\CompanyTools`, creates Desktop shortcut, configures Windows Defender exclusions, and detects Windows 11 Smart App Control.
-- **`[9] Device Info & Rename`:** Detailed hardware and network inspection with one-click computer renaming.
+- **`[9] Device Information & Asset QR Code Suite`:** Submenu featuring:
+  - **View Specs:** Full hardware, OS, network, serial numbers (SN# and BSN#), and asset summary.
+  - **Asset QR Code Generator:** Generates `Desktop\Asset Information.png` and `.txt` with exact asset payload (e.g. `i5 11th Gen, RAM 16GB, SSD 512 GB, 14-inch, SN# 5CD124NJSM, BSN# 5CD124NJSM`) for quick barcode/QR scanner audit tagging.
+  - **Rename Computer:** Full RFC 1123 hostname support up to 63 characters with hyphens (e.g. `CBE-IT-LAPTOP-0633`) and dual-method WMI fallback.
+  - **Export Report:** Hardware and installed software inventory audit.
 - **`[10] Network Diagnostics Suite`:** Gateway ping, DNS resolution checks, public IP query, and one-click DNS flush / Winsock stack reset.
 - **`[11] Windows OS Repair & Maintenance`:** SFC `/scannow`, DISM component repair, temporary cache cleanup, and SSD S.M.A.R.T. health checks.
 - **`[12] Debloat & Performance Tuning`:** High-performance power plan, NTP clock resynchronization, and consumer Appx bloatware removal.
